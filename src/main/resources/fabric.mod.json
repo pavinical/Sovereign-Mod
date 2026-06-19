@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "sovereign",
+  "version": "${version}",
+  "name": "Sovereign",
+  "description": "A village economy simulation mod. Found villages, manage resources, and build a trade empire.",
+  "authors": [
+    "pavinical"
+  ],
+  "contact": {
+    "sources": "https://github.com/pavinical/sovereign"
+  },
+  "license": "CC0-1.0",
+  "icon": "assets/sovereign/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      {
+        "value": "net.pavinical.sovereign.Sovereign",
+        "adapter": "kotlin"
+      }
+    ],
+    "fabric-datagen": [
+      {
+        "value": "net.pavinical.sovereign.SovereignDataGenerator",
+        "adapter": "kotlin"
+      }
+    ]
+  },
+  "mixins": [
+    "sovereign.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*",
+    "fabric-language-kotlin": "*"
+  }
+}
