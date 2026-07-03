@@ -8,8 +8,6 @@ import net.minecraft.item.Item
 import net.minecraft.item.ItemGroups
 import net.minecraft.registry.Registries
 import net.minecraft.registry.Registry
-import net.minecraft.registry.RegistryKey
-import net.minecraft.registry.RegistryKeys
 import net.minecraft.util.Identifier
 import net.pavinical.sovereign.block.ClerkTableBlock
 
@@ -22,17 +20,12 @@ import net.pavinical.sovereign.block.ClerkTableBlock
 object ModBlocks {
 
     private val CLERK_TABLE_ID: Identifier = Identifier.of("sovereign", "clerk_table")
-    private val CLERK_TABLE_BLOCK_KEY: RegistryKey<Block> =
-        RegistryKey.of(RegistryKeys.BLOCK, CLERK_TABLE_ID)
-    private val CLERK_TABLE_ITEM_KEY: RegistryKey<Item> =
-        RegistryKey.of(RegistryKeys.ITEM, CLERK_TABLE_ID)
 
     val CLERK_TABLE: Block = Registry.register(
         Registries.BLOCK,
         CLERK_TABLE_ID,
         ClerkTableBlock(
             AbstractBlock.Settings.create()
-                .registryKey(CLERK_TABLE_BLOCK_KEY)
                 .strength(3.5f)   // medium hardness — harder than wood, softer than stone
                 .requiresTool()
         )
@@ -46,7 +39,7 @@ object ModBlocks {
     private val CLERK_TABLE_ITEM: BlockItem = Registry.register(
         Registries.ITEM,
         CLERK_TABLE_ID,
-        BlockItem(CLERK_TABLE, Item.Settings().registryKey(CLERK_TABLE_ITEM_KEY))
+        BlockItem(CLERK_TABLE, Item.Settings())
     )
 
     fun register() {
@@ -56,5 +49,10 @@ object ModBlocks {
         ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register { entries ->
             entries.add(CLERK_TABLE_ITEM)
         }
+        ItemGroupEvents.modifyEntriesEvent(ItemGroups.SEARCH).register { entries ->
+            entries.add(CLERK_TABLE_ITEM)
+        }
     }
 }
+
+

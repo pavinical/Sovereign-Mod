@@ -72,6 +72,16 @@ tasks.jar {
 	}
 }
 
+val syncRunClientModJar by tasks.registering(Copy::class) {
+	dependsOn(tasks.named("remapJar"))
+	from(layout.buildDirectory.file("libs/${project.name}-$version.jar"))
+	into(layout.projectDirectory.dir("run/mods"))
+}
+
+tasks.named("runClient") {
+	dependsOn(syncRunClientModJar)
+}
+
 // configure the maven publication
 publishing {
 	publications {

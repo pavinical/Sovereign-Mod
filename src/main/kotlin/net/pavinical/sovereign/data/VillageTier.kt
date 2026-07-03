@@ -12,3 +12,4 @@ enum class VillageTier {
     TOWN,
     CITY
 }
+

@@ -26,9 +26,8 @@ object NamingSession {
 
     fun getPending(playerId: UUID): PendingVillage? = sessions[playerId]
 
-    fun hasPending(playerId: UUID): Boolean = sessions.containsKey(playerId)
-
     fun clear(playerId: UUID) {
         sessions.remove(playerId)
     }
 }
+

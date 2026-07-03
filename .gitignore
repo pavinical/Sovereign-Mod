@@ -38,3 +38,10 @@ hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
+# local scratch/extracted reference folders
+/backups/
+/net/
+tmp*/
+tmp_*/
+*.txt

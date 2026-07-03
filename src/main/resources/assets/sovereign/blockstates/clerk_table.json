@@ -1,7 +1,7 @@
 {
   "variants": {
     "": {
-      "model": "minecraft:block/lectern"
+      "model": "sovereign:block/clerk_table"
     }
   }
 }

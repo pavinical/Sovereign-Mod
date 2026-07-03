@@ -5,23 +5,38 @@ import java.util.UUID
 
 /**
  * All the data associated with a single registered village.
- *
- * @param id          Unique ID for this village — never changes.
- * @param name        Player-chosen display name.
- * @param biome       The biome path at the Clerk Table (e.g. "plains", "desert").
- * @param clerkPos    Block position of the Clerk Table that founded this village.
- * @param tier        Current progression tier; starts at HAMLET.
- * @param resources   Running totals for each resource category.
- * @param villagerIds UUIDs of villagers bound to this village's economy.
  */
 data class VillageData(
     val id: UUID,
     var name: String,
     val biome: String,
     val clerkPos: BlockPos,
+    val founderId: UUID? = null,
     var tier: VillageTier = VillageTier.HAMLET,
+    var experience: Int = 0,
     val resources: MutableMap<ResourceType, Int> = ResourceType.entries
         .associateWith { 0 }
         .toMutableMap(),
-    val villagerIds: MutableList<UUID> = mutableListOf()
+    var lastEconomyDay: Long = -1L,
+    var lastEconomyTick: Long = -1L,
+    var lastProductionTick: Long = -1L,
+    var lastNeedTick: Long = -1L,
+    var priceModifierDay: Long = -1L,
+    val dailyPriceModifiers: MutableMap<String, Int> = mutableMapOf(),
+    val producedResources: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val consumedResources: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val surplusResources: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val deficitResources: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val sellStockRemaining: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val sellStockRemainingByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val buyDemandTotal: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val buyDemandFulfilled: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val buyDemandTotalByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val buyDemandFulfilledByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val wantDemandTotalByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val wantDemandFulfilledByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val wantTradeCountByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val buyPrices: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
+    val sellPrices: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap()
 )
+
