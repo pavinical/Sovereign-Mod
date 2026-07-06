@@ -16,13 +16,16 @@ import net.pavinical.sovereign.block.professionDisplayName
 import net.pavinical.sovereign.block.HamletSlot
 import net.pavinical.sovereign.data.VillageData
 import net.pavinical.sovereign.data.VillageTier
+import net.pavinical.sovereign.economy.BuyOffer
+import net.pavinical.sovereign.economy.SellOffer
 import net.pavinical.sovereign.economy.VillageEconomyService
 import net.pavinical.sovereign.economy.VillageRegistry
 
-private const val ARG_NAME = "name"
-private const val ARG_NEW_NAME = "newname"
-private const val ARG_AMOUNT = "amount"
-private const val ARG_LEVEL = "level"
+    private const val ARG_NAME = "name"
+    private const val ARG_NEW_NAME = "newname"
+    private const val ARG_AMOUNT = "amount"
+    private const val ARG_TICKS = "ticks"
+    private const val ARG_LEVEL = "level"
 private const val MAX_VILLAGE_NAME_LENGTH = 16
 
 object VillageInfoCommand {
@@ -60,6 +63,40 @@ object VillageInfoCommand {
                             .executes { context ->
                                 executeRestockNamed(context.source, StringArgumentType.getString(context, ARG_NAME))
                             }
+                    )
+            )
+            dispatcher.register(
+                literal("villagerestocktest")
+                    .executes { context ->
+                        executeFastRestockNearest(context.source)
+                    }
+                    .then(
+                        argument(ARG_NAME, StringArgumentType.greedyString())
+                            .executes { context ->
+                                executeFastRestockNamed(context.source, StringArgumentType.getString(context, ARG_NAME))
+                            }
+                    )
+            )
+            dispatcher.register(
+                literal("villagerestockadvance")
+                    .then(
+                        argument(ARG_TICKS, IntegerArgumentType.integer(1))
+                            .executes { context ->
+                                executeAdvanceRestockNearest(context.source, IntegerArgumentType.getInteger(context, ARG_TICKS))
+                            }
+                    )
+                    .then(
+                        argument(ARG_NAME, StringArgumentType.string())
+                            .then(
+                                argument(ARG_TICKS, IntegerArgumentType.integer(1))
+                                    .executes { context ->
+                                        executeAdvanceRestockNamed(
+                                            context.source,
+                                            StringArgumentType.getString(context, ARG_NAME),
+                                            IntegerArgumentType.getInteger(context, ARG_TICKS)
+                                        )
+                                    }
+                            )
                     )
             )
             dispatcher.register(
@@ -299,6 +336,76 @@ object VillageInfoCommand {
         return Command.SINGLE_SUCCESS
     }
 
+    private fun executeFastRestockNamed(source: ServerCommandSource, rawName: String): Int {
+        val world = source.server.overworld
+        val registry = world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY)
+        val village = registry.getVillageByName(rawName)
+            ?: run {
+                source.sendFeedback({ Text.literal("No village named '$rawName' found.") }, false)
+                return Command.SINGLE_SUCCESS
+            }
+
+        source.sendFeedback({ VillageEconomyService.forceRestockTimers(world, village) }, false)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeAdvanceRestockNamed(source: ServerCommandSource, rawName: String, ticks: Int): Int {
+        val world = source.server.overworld
+        val registry = world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY)
+        val village = registry.getVillageByName(rawName)
+            ?: run {
+                source.sendFeedback({ Text.literal("No village named '$rawName' found.") }, false)
+                return Command.SINGLE_SUCCESS
+            }
+
+        if (ticks <= 0) {
+            source.sendFeedback({ Text.literal("Please provide a positive tick amount.") }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        source.sendFeedback({ VillageEconomyService.advanceRestockTimers(world, village, ticks.toLong()) }, false)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeAdvanceRestockNearest(source: ServerCommandSource, ticks: Int): Int {
+        val world = source.server.overworld
+        val player = source.player
+            ?: run {
+                source.sendFeedback({ Text.literal("Run /villagerestockadvance <name> <ticks> from the server console.") }, false)
+                return Command.SINGLE_SUCCESS
+            }
+        val registry = world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY)
+        val village = registry.getVillageWithinRadius(player.blockPos, 128)
+            ?: run {
+                source.sendFeedback({ Text.literal("No registered village found within 128 blocks. Use /villagerestockadvance <name> <ticks>.") }, false)
+                return Command.SINGLE_SUCCESS
+            }
+
+        if (ticks <= 0) {
+            source.sendFeedback({ Text.literal("Please provide a positive tick amount.") }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        source.sendFeedback({ VillageEconomyService.advanceRestockTimers(world, village, ticks.toLong()) }, false)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeFastRestockNearest(source: ServerCommandSource): Int {
+        val world = source.server.overworld
+        val player = source.player
+            ?: run {
+                source.sendFeedback({ Text.literal("Run /villagerestocktest <name> from the server console.") }, false)
+                return Command.SINGLE_SUCCESS
+            }
+        val registry = world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY)
+        val village = registry.getVillageWithinRadius(player.blockPos, 128)
+            ?: run {
+                source.sendFeedback({ Text.literal("No registered village found within 128 blocks. Use /villagerestocktest <name>.") }, false)
+                return Command.SINGLE_SUCCESS
+            }
+
+        source.sendFeedback({ VillageEconomyService.forceRestockTimers(world, village) }, false)
+        return Command.SINGLE_SUCCESS
+    }
+
     private fun formatVillageInfoDump(world: ServerWorld, village: VillageData): String {
         val blockEntity = world.getBlockEntity(village.clerkPos) as? ClerkTableBlockEntity
         val snapshot = blockEntity?.getSnapshot(village) ?: return buildString {
@@ -358,8 +465,16 @@ object VillageInfoCommand {
     private fun buildVillageInfoText(world: ServerWorld, village: VillageData): Text {
         val blockEntity = world.getBlockEntity(village.clerkPos) as? ClerkTableBlockEntity
         val snapshot = blockEntity?.getSnapshot(village)
+        val marketSnapshot = VillageEconomyService.openSnapshot(world, village.clerkPos)
         val nextXp = nextTierExperience(village.tier)
         val xpLine = if (village.tier == VillageTier.CITY) "${village.experience} XP (max tier)" else "${village.experience}/$nextXp XP"
+        val storageUsed = village.sellStockRemainingByProfession.values.sumOf { it.coerceAtLeast(0) }
+        val storageCapacity = villageStorageCapacity(village.tier)
+        val storageLine = if (storageCapacity > 0 && storageUsed >= storageCapacity) {
+            "$storageUsed/$storageCapacity full"
+        } else {
+            "$storageUsed/$storageCapacity"
+        }
 
         val populationLine = if (snapshot != null) {
             "${snapshot.population} total, ${snapshot.activeCount} active, ${snapshot.temporarilyMissingCount} missing, ${snapshot.deceasedCount} deceased"
@@ -373,6 +488,10 @@ object VillageInfoCommand {
             }
             ?: "unavailable"
 
+        val workerSlotsLine = snapshot?.hamletSlots
+            ?.let { slots -> "${slots.count { it.occupied }}/${slots.size} filled" }
+            ?: "unavailable"
+
         val slotLines = snapshot
             ?.hamletSlots
             ?.let(::formatSlots)
@@ -384,11 +503,13 @@ object VillageInfoCommand {
             .append(infoLine("Level", village.tier.displayName(), Formatting.AQUA))
             .append(infoLine("XP", xpLine, Formatting.GREEN))
             .append(infoLine("Population", populationLine, Formatting.YELLOW))
+            .append(infoLine("Worker Slots", workerSlotsLine, Formatting.YELLOW))
+            .append(infoLine("Storage", storageLine, if (storageUsed >= storageCapacity) Formatting.RED else Formatting.GREEN))
             .append(infoLine("Professions", professionsLine, Formatting.WHITE))
-            .append(infoLine("Village Sells", formatTradeMap(village.sellStockRemainingByProfession), Formatting.GREEN))
-            .append(infoLine("Village Needs", formatDemandMap(village.buyDemandTotalByProfession, village.buyDemandFulfilledByProfession), Formatting.RED))
-            .append(infoLine("Village Wants", formatDemandMap(village.wantDemandTotalByProfession, village.wantDemandFulfilledByProfession), Formatting.LIGHT_PURPLE))
-            .append(Text.literal("Worker Slots\n").formatted(Formatting.GOLD))
+            .append(infoLine("Village Sells", formatSellOffers(marketSnapshot?.sellOffers.orEmpty()), Formatting.GREEN))
+            .append(infoLine("Village Wants", formatBuyOffers(marketSnapshot?.buyOffers.orEmpty()), Formatting.LIGHT_PURPLE))
+            .append(infoLine("Turn-ins Today", formatTradeMap(village.wantTradeCountByProfession), Formatting.GRAY))
+            .append(Text.literal("Slot Groups\n").formatted(Formatting.GOLD))
             .append(Text.literal(slotLines).formatted(Formatting.GRAY))
     }
 
@@ -418,9 +539,32 @@ object VillageInfoCommand {
     private fun formatTradeMap(values: Map<String, Int>): String {
         val active = values.filterValues { it > 0 }
         if (active.isEmpty()) return "none"
-        return active.entries.joinToString(", ") { (key, value) ->
+        return active.entries
+            .sortedByDescending { it.value }
+            .take(8)
+            .joinToString(", ") { (key, value) ->
             "${tradeKeyLabel(key)}=$value"
         }
+    }
+
+    private fun formatSellOffers(offers: List<SellOffer>): String {
+        if (offers.isEmpty()) return "none"
+        return offers
+            .sortedByDescending { it.remainingToday }
+            .take(6)
+            .joinToString(", ") { offer ->
+                "${offer.displayName} ${offer.remainingToday}/${offer.maxDailyProduction} @ ${offer.tradeItemCount}->${offer.emeraldCost}e"
+            }
+    }
+
+    private fun formatBuyOffers(offers: List<BuyOffer>): String {
+        if (offers.isEmpty()) return "none"
+        return offers
+            .sortedByDescending { it.remainingNeed }
+            .take(6)
+            .joinToString(", ") { offer ->
+                "${offer.displayName} ${offer.remainingNeed}/${offer.maxDailyNeed} @ ${offer.tradeItemCount}->${offer.emeraldReward}e"
+            }
     }
 
     private fun formatDemandMap(total: Map<String, Int>, fulfilled: Map<String, Int>): String {
@@ -460,6 +604,16 @@ object VillageInfoCommand {
             VillageTier.VILLAGE -> 5000
             VillageTier.TOWN -> 15000
             VillageTier.CITY -> 15000
+        }
+    }
+
+    private fun villageStorageCapacity(tier: VillageTier): Int {
+        return when (tier) {
+            VillageTier.HAMLET -> 128
+            VillageTier.SETTLEMENT -> 256
+            VillageTier.VILLAGE -> 512
+            VillageTier.TOWN -> 768
+            VillageTier.CITY -> 1024
         }
     }
 }

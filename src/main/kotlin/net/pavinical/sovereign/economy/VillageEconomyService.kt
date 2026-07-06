@@ -29,18 +29,29 @@ import java.util.Locale
 
 private const val FARMER_DAILY_OUTPUT_CAP = 10
 private const val TICKS_PER_DAY = 24000L
-private const val PRODUCE_INTERVAL_TICKS = 2400L
-private const val NEED_INTERVAL_TICKS = 4800L
 private const val LEATHERWORKER_ID = "minecraft:leatherworker"
 private const val BUTCHER_ID = "minecraft:butcher"
 private const val WANT_KEY_PREFIX = "want|"
+private const val WANT_GROUP_KEY_PREFIX = "want_group|"
 private const val OUTPUT_KEY_PREFIX = "output|"
 private const val CLERIC_POTION_VARIANT_COUNT = 3
 private const val NORMAL_PRODUCT_PRICE_PERCENT = 100
-private const val ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT = 105
-private const val ARTISAN_TOWN_PRODUCT_PRICE_PERCENT = 107
-private const val ARTISAN_CITY_PRODUCT_PRICE_PERCENT = 110
-private const val WANT_DIMINISHING_RETURN_BUCKET_SIZE = 8
+private const val ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT = 125
+private const val ARTISAN_TOWN_PRODUCT_PRICE_PERCENT = 160
+private const val ARTISAN_CITY_PRODUCT_PRICE_PERCENT = 220
+private const val PEASANT_PRODUCTION_INTERVAL_TICKS = 6000L
+private const val WANT_DIMINISHING_RETURN_BUCKET_SIZE = 16
+private const val WANT_DAILY_FLOOR_TRADE_LIMIT = 64
+private const val WANT_DAILY_LIMIT_DIVISOR = 1
+private const val PEASANT_ADVANCED_WANT_DAILY_LIMIT = 64
+private const val BOOK_WANT_DAILY_LIMIT = 64
+private const val NON_STACKABLE_WANT_TURN_IN_LIMIT = 4
+private const val NON_STACKABLE_WANT_XP_REWARD = 5
+private const val PROFESSION_PRICE_EFFECTIVE_COUNT_CAP = 6
+private const val PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_PER_EXTRA = 5
+private const val PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_MAX = 25
+private const val PROFESSION_DEMAND_PRICE_BONUS_PERCENT_PER_EXTRA = 8
+private const val PROFESSION_DEMAND_PRICE_BONUS_PERCENT_MAX = 40
 
 data class VillageTradeExecutionResult(
     val accepted: Boolean,
@@ -49,6 +60,30 @@ data class VillageTradeExecutionResult(
 )
 
 object VillageEconomyService {
+    private data class ProfessionMarketCounts(
+        val totalByProfession: Map<String, Int>,
+        val occupiedByProfession: Map<String, Int>
+    )
+
+    private data class WantOfferComponent(
+        val professionName: String,
+        val wantKey: String,
+        val want: Commodity,
+        val price: PriceBreakdown,
+        val baseUnitPrice: Int,
+        val currentUnitPrice: Int,
+        val exchange: TradeExchange,
+        val alreadyTraded: Int,
+        val dailyLimit: Int,
+        val remainingDaily: Int,
+        val requesterCount: Int
+    )
+
+    private data class WantOfferCollection(
+        val components: List<WantOfferComponent>,
+        val changedDemand: Boolean
+    )
+
     fun openSnapshot(world: ServerWorld, clerkPos: BlockPos): VillageMarketSnapshot? {
         val village = getVillage(world, clerkPos) ?: return null
         val blockEntity = getClerkTable(world, village, clerkPos) ?: return null
@@ -69,7 +104,8 @@ object VillageEconomyService {
             tierName = village.tier.displayName(),
             villageExperience = village.experience,
             currentTierMinExperience = tierMinExperience(village.tier),
-            nextTierExperience = nextTierExperience(village.tier)
+            nextTierExperience = nextTierExperience(village.tier),
+            info = buildVillageInfo(village, null)
         )
     }
 
@@ -80,7 +116,8 @@ object VillageEconomyService {
 
         for (slot in censusSnapshot.hamletSlots) {
             if (!slot.occupied) continue
-            val professionId = Registries.VILLAGER_PROFESSION.getId(slot.requiredProfession).toString()
+            val profession = normalizeProfessionForTradeSimulation(slot.requiredProfession)
+            val professionId = Registries.VILLAGER_PROFESSION.getId(profession).toString()
             professionCounts[professionId] = (professionCounts[professionId] ?: 0) + 1
         }
 
@@ -103,14 +140,7 @@ object VillageEconomyService {
                 stockedItems += sellCapacity
             }
 
-            val needCapacity = profile.need?.let { count * it.amount } ?: 0
-            if (needCapacity > 0) {
-                village.buyDemandTotalByProfession[professionId] = needCapacity
-                village.buyDemandFulfilledByProfession[professionId] = 0
-                demandedItems += needCapacity
-            }
-
-            for (want in profile.wantsForTier(village.tier)) {
+            for (want in profile.requestsForTier(village.tier)) {
                 val key = wantKey(professionId, want.item)
                 val wantCapacity = count * want.amount
                 village.wantDemandTotalByProfession[key] = wantCapacity
@@ -124,6 +154,83 @@ object VillageEconomyService {
 
         return Text.literal(
             "Restocked '${village.name}' to full capacity: $stockedItems item(s) for sale, $demandedItems item(s) needed."
+        )
+    }
+
+    fun forceRestockTimers(world: ServerWorld, village: VillageData): Text {
+        val clerk = getClerkTable(world, village, village.clerkPos)
+            ?: return Text.literal("Could not fast-restock '${village.name}': clerk table is missing.")
+
+        val censusSnapshot = ClerkCensusService.forceSyncVillage(world, village)
+            ?: return Text.literal("Could not fast-restock '${village.name}': clerk table is missing.")
+
+        val currentDay = world.time / TICKS_PER_DAY
+        village.lastEconomyDay = currentDay - 1L
+        village.priceModifierDay = -1L
+        village.dailyPriceModifiers.clear()
+        val changed = ClerkEconomyService.refreshVillageFromSnapshot(world, village, censusSnapshot)
+
+        if (changed) {
+            world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        }
+        val lastProduction = clerk.getSnapshot(village)
+        val nextTradeTicks = nextTradeProgressTicksRemaining(world, village)
+        val nextProduceTicks = nextProduceProgressTicksRemaining(world, village)
+        val nextNeedTicks = nextNeedProgressTicksRemaining(world, village)
+        return if (changed) {
+            Text.literal(
+                "Fast-restocked '${village.name}' (timer advance applied): " +
+                    "next trade in ${nextTradeTicks} tick(s), next produce in ${nextProduceTicks} tick(s), next wants in ${nextNeedTicks} tick(s)."
+            )
+        } else {
+            Text.literal(
+                "Fast-restocked '${village.name}', no stock changes were pending."
+            )
+        }
+    }
+
+    fun advanceRestockTimers(world: ServerWorld, village: VillageData, ticksToAdvance: Long): Text {
+        val clerk = getClerkTable(world, village, village.clerkPos)
+            ?: return Text.literal("Could not advance '${village.name}': clerk table is missing.")
+        val snapshot = ClerkCensusService.forceSyncVillage(world, village)
+            ?: return Text.literal("Could not advance '${village.name}': clerk table is missing.")
+
+        if (ticksToAdvance <= 0L) {
+            return Text.literal("Please provide a positive tick value to advance the timers.")
+        }
+
+        val currentTime = world.time
+        if (village.lastEconomyTick < 0L) {
+            village.lastEconomyTick = currentTime
+        }
+        if (village.lastProductionTick < 0L) {
+            village.lastProductionTick = currentTime
+        }
+        if (village.lastNeedTick < 0L) {
+            village.lastNeedTick = currentTime
+        }
+
+        val advance = ticksToAdvance.coerceAtLeast(1L)
+        village.lastProductionTick -= advance
+        village.lastNeedTick -= advance
+        village.lastEconomyTick -= advance
+        val artisanRefillTicks = village.artisanRefillTickByProfession.toMap()
+        village.artisanRefillTickByProfession.clear()
+        artisanRefillTicks.forEach { (stockKey, tick) ->
+            village.artisanRefillTickByProfession[stockKey] = tick - advance
+        }
+        val changed = ClerkEconomyService.refreshVillageFromSnapshot(world, village, snapshot)
+
+        if (changed) {
+            world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        }
+
+        val nextTradeTicks = nextTradeProgressTicksRemaining(world, village)
+        val nextProduceTicks = nextProduceProgressTicksRemaining(world, village)
+        val nextNeedTicks = nextNeedProgressTicksRemaining(world, village)
+        return Text.literal(
+            "Advanced '${village.name}' restock timers by $advance tick(s): " +
+                "next trade in $nextTradeTicks tick(s), next produce in $nextProduceTicks tick(s), next wants in $nextNeedTicks tick(s)."
         )
     }
 
@@ -165,36 +272,41 @@ object VillageEconomyService {
         censusSnapshot: VillageEconomyState
     ): VillageTradeExecutionResult {
         val tradeProfessionId = professionIdFromOutputKey(professionId) ?: professionId
-        val profile = professionTradeProfile(tradeProfessionId)
+        val normalizedTradeProfessionId = professionIdNormalizedForTrade(tradeProfessionId)
+        val profile = professionTradeProfile(normalizedTradeProfessionId)
             ?: return VillageTradeExecutionResult(false, Text.literal("Unknown profession trade."))
 
         val output = outputItemIdFromOutputKey(professionId)
             ?.let { itemId -> profile.outputsForTier(village.tier, village).firstOrNull { it.keyItemId() == itemId } }
             ?: profile.outputsForTier(village.tier, village).firstOrNull()
             ?: return VillageTradeExecutionResult(false, Text.literal("This profession has no produce to sell."))
-        val stockKey = if (professionId.startsWith(OUTPUT_KEY_PREFIX)) professionId else outputKey(tradeProfessionId, output)
+        val stockKey = resolveSellStockKey(village, normalizedTradeProfessionId, output, professionId)
         val remaining = village.sellStockRemainingByProfession[stockKey]?.coerceAtLeast(0) ?: 0
-        if (remaining <= 0) {
+        val professionCount = professionCountFor(censusSnapshot, normalizedTradeProfessionId)
+        val stockCapacity = professionCount * output.amount
+        val unitPrice = getProductPrice(village, output, remaining, stockCapacity, professionCount).currentPrice
+        val exchange = tradeExchange(output, unitPrice)
+        val availableTradeUnits = remaining / exchange.itemCount
+        if (availableTradeUnits <= 0) {
             return VillageTradeExecutionResult(false, Text.literal("This trade is currently unavailable."))
         }
 
         val quantity = if (requestedQuantity == Int.MAX_VALUE) {
-            remaining
+            availableTradeUnits
         } else {
-            requestedQuantity.coerceAtLeast(1).coerceAtMost(remaining)
+            requestedQuantity.coerceAtLeast(1).coerceAtMost(availableTradeUnits)
         }
-        val stockCapacity = professionCountFor(censusSnapshot, tradeProfessionId) * output.amount
-        val unitPrice = getProductPrice(village, output, remaining, stockCapacity).currentPrice
-        val emeraldsNeeded = unitPrice * quantity
+        val itemsBought = quantity * exchange.itemCount
+        val emeraldsNeeded = exchange.emeralds * quantity
 
         if (player.inventory.count(Items.EMERALD) < emeraldsNeeded) {
             return VillageTradeExecutionResult(false, Text.literal("You need $emeraldsNeeded emerald(s) for this trade."))
         }
 
-        if (!hasInventorySpace(player, output.item, quantity)) {
+        if (!hasInventorySpace(player, output.item, itemsBought)) {
             return VillageTradeExecutionResult(
                 false,
-                Text.literal("You need inventory space for ${quantity}x ${output.itemName}.")
+                Text.literal("You need inventory space for ${itemsBought}x ${output.itemName}.")
             )
         }
 
@@ -204,18 +316,25 @@ object VillageEconomyService {
             return VillageTradeExecutionResult(false, Text.literal("Could not spend emeralds safely."))
         }
 
-        val rewardStack = output.stack(world, quantity)
+        val rewardStack = output.stack(world, itemsBought)
         if (!player.inventory.insertStack(rewardStack)) {
             player.inventory.insertStack(ItemStack(Items.EMERALD, emeraldsNeeded))
             return VillageTradeExecutionResult(false, Text.literal("Could not add items to inventory."))
         }
 
-        village.sellStockRemainingByProfession[stockKey] = remaining - quantity
+        val newRemaining = remaining - itemsBought
+        village.sellStockRemainingByProfession[stockKey] = newRemaining
+
+        val stockCapacityForCooldown = professionCountFor(censusSnapshot, normalizedTradeProfessionId) * output.amount
+        if (isArtisanProfession(normalizedTradeProfessionId) && newRemaining < stockCapacityForCooldown) {
+            ClerkEconomyService.noteArtisanStockSold(village, stockKey, world.time)
+        }
+
         world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
 
         return VillageTradeExecutionResult(
             true,
-            Text.literal("You bought ${quantity}x ${output.itemName} for $emeraldsNeeded emerald(s).")
+            Text.literal("You bought ${itemsBought}x ${output.itemName} for $emeraldsNeeded emerald(s).")
         )
     }
 
@@ -227,67 +346,18 @@ object VillageEconomyService {
         requestedQuantity: Int,
         censusSnapshot: VillageEconomyState
     ): VillageTradeExecutionResult {
+        if (professionId.startsWith(WANT_GROUP_KEY_PREFIX)) {
+            return processSellGroupedWantToVillage(world, player, village, professionId, requestedQuantity, censusSnapshot)
+        }
         if (professionId.startsWith(WANT_KEY_PREFIX)) {
             return processSellWantToVillage(world, player, village, professionId, requestedQuantity, censusSnapshot)
         }
         val profile = professionTradeProfile(professionId)
             ?: return VillageTradeExecutionResult(false, Text.literal("Unknown profession trade."))
 
-        val need = profile.need ?: return VillageTradeExecutionResult(false, Text.literal("This profession has no demand."))
-        val demandTotal = village.buyDemandTotalByProfession[professionId] ?: 0
-        val remainingNeed = demandTotal.coerceAtLeast(0)
-        if (remainingNeed <= 0) {
-            return VillageTradeExecutionResult(false, Text.literal("Demand is already fulfilled for this profession today."))
-        }
-
-        val quantity = if (requestedQuantity == Int.MAX_VALUE) {
-            remainingNeed
-        } else {
-            requestedQuantity.coerceAtLeast(1).coerceAtMost(remainingNeed)
-        }
-        val demandCapacity = professionCountFor(censusSnapshot, professionId) * need.amount
-        val unitPrice = getNeedPrice(village, need, remainingNeed, demandCapacity).currentPrice
-        val emeraldReward = unitPrice * quantity
-
-        if (player.inventory.count(need.item) < quantity) {
-            return VillageTradeExecutionResult(
-                false,
-                Text.literal("You need ${quantity}x ${need.itemName} to complete this trade.")
-            )
-        }
-
-        if (!hasInventorySpace(player, Items.EMERALD, emeraldReward)) {
-            return VillageTradeExecutionResult(false, Text.literal("Not enough room for emerald payment."))
-        }
-
-        val removed = player.inventory.remove({ stack -> stack.isOf(need.item) }, quantity, player.inventory)
-        if (removed < quantity) {
-            player.inventory.offerOrDrop(ItemStack(need.item, removed))
-            return VillageTradeExecutionResult(false, Text.literal("Could not remove requested items safely."))
-        }
-
-        val payment = ItemStack(Items.EMERALD, emeraldReward)
-        if (!player.inventory.insertStack(payment)) {
-            player.inventory.insertStack(ItemStack(need.item, quantity))
-            return VillageTradeExecutionResult(false, Text.literal("Not enough room for emerald payment."))
-        }
-
-        village.buyDemandTotalByProfession[professionId] = (demandTotal - quantity).coerceAtLeast(0)
-        village.buyDemandFulfilledByProfession[professionId] = 0
-        val grantsHamletExperience = village.tier == VillageTier.HAMLET
-        val oldTier = village.tier
-        if (grantsHamletExperience) {
-            village.experience += quantity
-            updateVillageTier(village)
-        }
-        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
-
-        val experienceText = if (grantsHamletExperience) " and +$quantity village XP" else ""
-        val tierText = if (village.tier != oldTier) " ${village.name} is now a ${village.tier.name.lowercase(Locale.ROOT)}!" else ""
-        return VillageTradeExecutionResult(
-            true,
-            Text.literal("You sold ${quantity}x ${need.itemName} for $emeraldReward emerald(s)$experienceText.$tierText")
-        )
+        val request = profile.requestsForTier(village.tier).firstOrNull()
+            ?: return VillageTradeExecutionResult(false, Text.literal("This profession has no request."))
+        return processSellRequestToVillage(world, player, village, professionId, wantKey(professionId, request.item), request, requestedQuantity, censusSnapshot)
     }
 
     private fun processSellWantToVillage(
@@ -302,40 +372,92 @@ object VillageEconomyService {
             ?: return VillageTradeExecutionResult(false, Text.literal("Unknown village want."))
         val profile = professionTradeProfile(professionId)
             ?: return VillageTradeExecutionResult(false, Text.literal("Unknown profession want."))
-        val want = profile.wantsForTier(village.tier).firstOrNull { wantKey(professionId, it.item) == rawWantKey }
+        val want = profile.requestsForTier(village.tier).firstOrNull { wantKey(professionId, it.item) == rawWantKey }
             ?: return VillageTradeExecutionResult(false, Text.literal("This want is not unlocked yet."))
 
-        val availableItems = player.inventory.count(want.item)
-        val quantity = if (requestedQuantity == Int.MAX_VALUE) {
-            availableItems
-        } else {
-            requestedQuantity.coerceAtLeast(1)
-        }
-        if (quantity <= 0 || availableItems < quantity) {
-            return VillageTradeExecutionResult(false, Text.literal("You need ${quantity.coerceAtLeast(1)}x ${want.itemName} to complete this want."))
+        return processSellRequestToVillage(world, player, village, professionId, rawWantKey, want, requestedQuantity, censusSnapshot)
+    }
+
+    private fun processSellGroupedWantToVillage(
+        world: ServerWorld,
+        player: ServerPlayerEntity,
+        village: VillageData,
+        groupedWantKey: String,
+        requestedQuantity: Int,
+        censusSnapshot: VillageEconomyState
+    ): VillageTradeExecutionResult {
+        val itemId = itemIdFromWantGroupKey(groupedWantKey)
+            ?: return VillageTradeExecutionResult(false, Text.literal("Unknown village want."))
+        val marketCounts = professionMarketCounts(censusSnapshot)
+        val collection = collectWantOfferComponents(village, marketCounts.totalByProfession, marketCounts.occupiedByProfession)
+        val candidates = collection.components
+            .filter { itemIdOf(it.want.item) == itemId && it.remainingDaily > 0 }
+            .sortedWith(compareByDescending<WantOfferComponent> { it.exchange.valuePerItemScaled() }.thenBy { it.professionName })
+        if (candidates.isEmpty()) {
+            return VillageTradeExecutionResult(false, Text.literal("This request has cooled down until the next daily restock."))
         }
 
-        val demandCapacity = professionCountFor(censusSnapshot, professionId) * want.amount
-        val baseUnitPrice = getNeedPrice(village, want, demandCapacity, demandCapacity).currentPrice
-        val alreadyTraded = village.wantTradeCountByProfession[rawWantKey] ?: 0
-        val emeraldReward = wantTradeReward(baseUnitPrice, alreadyTraded, quantity)
+        val item = candidates.first().want.item
+        var availableItems = player.inventory.count(item)
+        val totalRemaining = candidates.sumOf { it.remainingDaily / it.exchange.itemCount }
+        val quantity = if (requestedQuantity == Int.MAX_VALUE) {
+            candidates.sumOf { candidate ->
+                val candidateUnits = minOf(candidate.remainingDaily / candidate.exchange.itemCount, availableItems / candidate.exchange.itemCount)
+                availableItems -= candidateUnits * candidate.exchange.itemCount
+                candidateUnits
+            }
+        } else {
+            requestedQuantity.coerceAtLeast(1).coerceAtMost(totalRemaining)
+        }
+        if (quantity <= 0) {
+            return VillageTradeExecutionResult(false, Text.literal("You need ${candidates.first().exchange.itemCount}x ${candidates.first().want.itemName} to complete this request."))
+        }
+
+        var remainingToAssign = quantity
+        var remainingAvailableItems = player.inventory.count(item)
+        val assignments = mutableListOf<Pair<WantOfferComponent, Int>>()
+        for (candidate in candidates) {
+            if (remainingToAssign <= 0) break
+            val assigned = minOf(
+                remainingToAssign,
+                candidate.remainingDaily / candidate.exchange.itemCount,
+                remainingAvailableItems / candidate.exchange.itemCount
+            )
+            if (assigned > 0) {
+                assignments.add(candidate to assigned)
+                remainingToAssign -= assigned
+                remainingAvailableItems -= assigned * candidate.exchange.itemCount
+            }
+        }
+        val itemsSold = assignments.sumOf { (candidate, units) -> candidate.exchange.itemCount * units }
+        if (itemsSold <= 0) {
+            return VillageTradeExecutionResult(false, Text.literal("You need ${candidates.first().exchange.itemCount}x ${candidates.first().want.itemName} to complete this request."))
+        }
+        val emeraldReward = assignments.sumOf { (candidate, amount) ->
+            tradeRewardFor(candidate.exchange, candidate.baseUnitPrice, candidate.alreadyTraded, amount)
+        }
         if (!hasInventorySpace(player, Items.EMERALD, emeraldReward)) {
             return VillageTradeExecutionResult(false, Text.literal("Not enough room for emerald payment."))
         }
 
-        val removed = player.inventory.remove({ stack -> stack.isOf(want.item) }, quantity, player.inventory)
-        if (removed < quantity) {
-            player.inventory.offerOrDrop(ItemStack(want.item, removed))
+        val removed = player.inventory.remove({ stack -> stack.isOf(item) }, itemsSold, player.inventory)
+        if (removed < itemsSold) {
+            player.inventory.offerOrDrop(ItemStack(item, removed))
             return VillageTradeExecutionResult(false, Text.literal("Could not remove requested items safely."))
         }
 
         if (!player.inventory.insertStack(ItemStack(Items.EMERALD, emeraldReward))) {
-            player.inventory.insertStack(ItemStack(want.item, quantity))
+            player.inventory.insertStack(ItemStack(item, itemsSold))
             return VillageTradeExecutionResult(false, Text.literal("Not enough room for emerald payment."))
         }
 
-        village.wantTradeCountByProfession[rawWantKey] = alreadyTraded + quantity
-        village.experience += quantity
+        var experienceGained = 0
+        for ((candidate, amount) in assignments) {
+            val itemAmount = amount * candidate.exchange.itemCount
+            village.wantTradeCountByProfession[candidate.wantKey] = candidate.alreadyTraded + itemAmount
+            experienceGained += itemAmount * candidate.want.experienceReward()
+        }
+        village.experience += experienceGained
         val oldTier = village.tier
         updateVillageTier(village)
         world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
@@ -343,7 +465,71 @@ object VillageEconomyService {
         val tierText = if (village.tier != oldTier) " ${village.name} is now a ${village.tier.name.lowercase(Locale.ROOT)}!" else ""
         return VillageTradeExecutionResult(
             true,
-            Text.literal("You fulfilled ${quantity}x ${want.itemName} for $emeraldReward emerald(s) and +$quantity village XP.$tierText")
+            Text.literal("You fulfilled ${itemsSold}x ${candidates.first().want.itemName} for $emeraldReward emerald(s) and +$experienceGained village XP.$tierText")
+        )
+    }
+
+    private fun processSellRequestToVillage(
+        world: ServerWorld,
+        player: ServerPlayerEntity,
+        village: VillageData,
+        professionId: String,
+        requestKey: String,
+        request: Commodity,
+        requestedQuantity: Int,
+        censusSnapshot: VillageEconomyState
+    ): VillageTradeExecutionResult {
+        val availableItems = player.inventory.count(request.item)
+        val demandCapacity = (professionCountFor(censusSnapshot, professionId) * request.amount).coerceAtLeast(1)
+        val baseUnitPrice = applyProfessionDemandPrice(
+            price = getNeedPrice(village, request, demandCapacity, demandCapacity).currentPrice,
+            professionCount = professionCountFor(censusSnapshot, professionId)
+        )
+        val exchange = tradeExchange(request, wantPriceWithDiminishingReturns(baseUnitPrice, village.wantTradeCountByProfession[requestKey] ?: 0))
+        val alreadyTraded = village.wantTradeCountByProfession[requestKey] ?: 0
+        val remainingDaily = wantDailyTradeLimit(baseUnitPrice, request) - alreadyTraded
+        val availableTradeUnits = remainingDaily / exchange.itemCount
+        if (availableTradeUnits <= 0) {
+            return VillageTradeExecutionResult(false, Text.literal("This request has cooled down until the next daily restock."))
+        }
+
+        val quantity = if (requestedQuantity == Int.MAX_VALUE) {
+            (availableItems / exchange.itemCount).coerceAtMost(availableTradeUnits)
+        } else {
+            requestedQuantity.coerceAtLeast(1).coerceAtMost(availableTradeUnits)
+        }
+        val itemsSold = quantity * exchange.itemCount
+        if (quantity <= 0 || availableItems < itemsSold) {
+            return VillageTradeExecutionResult(false, Text.literal("You need ${exchange.itemCount}x ${request.itemName} to complete this request."))
+        }
+
+        val emeraldReward = tradeRewardFor(exchange, baseUnitPrice, alreadyTraded, quantity)
+        if (!hasInventorySpace(player, Items.EMERALD, emeraldReward)) {
+            return VillageTradeExecutionResult(false, Text.literal("Not enough room for emerald payment."))
+        }
+
+        val removed = player.inventory.remove({ stack -> stack.isOf(request.item) }, itemsSold, player.inventory)
+        if (removed < itemsSold) {
+            player.inventory.offerOrDrop(ItemStack(request.item, removed))
+            return VillageTradeExecutionResult(false, Text.literal("Could not remove requested items safely."))
+        }
+
+        if (!player.inventory.insertStack(ItemStack(Items.EMERALD, emeraldReward))) {
+            player.inventory.insertStack(ItemStack(request.item, itemsSold))
+            return VillageTradeExecutionResult(false, Text.literal("Not enough room for emerald payment."))
+        }
+
+        village.wantTradeCountByProfession[requestKey] = alreadyTraded + itemsSold
+        val experienceGained = itemsSold * request.experienceReward()
+        village.experience += experienceGained
+        val oldTier = village.tier
+        updateVillageTier(village)
+        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+
+        val tierText = if (village.tier != oldTier) " ${village.name} is now a ${village.tier.name.lowercase(Locale.ROOT)}!" else ""
+        return VillageTradeExecutionResult(
+            true,
+            Text.literal("You fulfilled ${itemsSold}x ${request.itemName} for $emeraldReward emerald(s) and +$experienceGained village XP.$tierText")
         )
     }
 
@@ -362,18 +548,14 @@ object VillageEconomyService {
             "Hamlet",
             0,
             0,
-            300
+            300,
+            VillageInfoData.EMPTY
         )
         ensureDailyPriceModifiers(world, village)
 
-        val professionCounts = mutableMapOf<String, Int>()
-        val occupiedProfessionCounts = mutableMapOf<String, Int>()
-        for (slot in censusSnapshot.hamletSlots) {
-            if (!slot.occupied) continue
-            val professionId = slot.requiredProfession.let { Registries.VILLAGER_PROFESSION.getId(it).toString() }
-            professionCounts[professionId] = (professionCounts[professionId] ?: 0) + 1
-            occupiedProfessionCounts[professionId] = (occupiedProfessionCounts[professionId] ?: 0) + 1
-        }
+        val marketCounts = professionMarketCounts(censusSnapshot)
+        val professionCounts = marketCounts.totalByProfession
+        val occupiedProfessionCounts = marketCounts.occupiedByProfession
 
         var changedStock = false
         val sellOffers = buildList {
@@ -385,20 +567,22 @@ object VillageEconomyService {
                     val stockKey = outputKey(professionId, output)
                     val maxDaily = count * output.amount
                     if (maxDaily <= 0) continue
-                    val remaining = village.sellStockRemainingByProfession[stockKey] ?: 0
+                    val remaining = getSellStockForProfession(village, professionId, output)
                     if (!village.sellStockRemainingByProfession.containsKey(stockKey)) {
                         village.sellStockRemainingByProfession[stockKey] = 0
                         changedStock = true
                     }
-                    val price = getProductPrice(village, output, remaining, maxDaily)
+                    val price = getProductPrice(village, output, remaining, villageStorageCapacity(village.tier), count)
+                    val exchange = tradeExchange(output, price.currentPrice)
                     add(
                         SellOffer(
                             item = output.stack(world),
                             displayName = output.displayLabel(),
-                            emeraldCost = price.currentPrice,
+                            emeraldCost = exchange.emeralds,
+                            tradeItemCount = exchange.itemCount,
                             producedToday = maxDaily,
                             remainingToday = remaining,
-                            maxDailyProduction = maxDaily,
+                            maxDailyProduction = villageStorageCapacity(village.tier),
                             baseValue = price.baseValue,
                             minPrice = price.minPrice,
                             maxPrice = price.maxPrice,
@@ -413,83 +597,52 @@ object VillageEconomyService {
                     )
                 }
             }
-        }.sortedBy { it.producerProfessionId }
+        }.sortedWith(
+            compareByDescending<SellOffer> { it.remainingToday }
+                .thenByDescending { it.stockPercent }
+                .thenBy { it.displayName }
+                .thenBy { it.producerProfessionId }
+        )
 
-        var changedDemand = false
+        val wantOfferCollection = collectWantOfferComponents(village, professionCounts, occupiedProfessionCounts)
+        val changedDemand = wantOfferCollection.changedDemand
         val buyOffers = buildList {
-            for ((professionId, count) in professionCounts) {
-                val profile = professionTradeProfile(professionId) ?: continue
-                val need = profile.need ?: continue
-                val profession = professionById(professionId) ?: continue
-                val occupiedCount = occupiedProfessionCounts[professionId] ?: 0
-                val demand = village.buyDemandTotalByProfession[professionId] ?: 0
-                if (!village.buyDemandTotalByProfession.containsKey(professionId)) {
-                    village.buyDemandTotalByProfession[professionId] = demand
-                    changedDemand = true
-                }
-                val maxDailyNeed = count * need.amount
-                val remainingNeed = demand.coerceIn(0, maxDailyNeed)
-                val price = getNeedPrice(village, need, remainingNeed, maxDailyNeed)
+            for ((_, components) in wantOfferCollection.components.groupBy { itemIdOf(it.want.item) }) {
+                val sortedComponents = components.sortedWith(
+                    compareByDescending<WantOfferComponent> { it.exchange.valuePerItemScaled() }.thenBy { it.professionName }
+                )
+                val representative = sortedComponents.first()
+                val professionNames = sortedComponents.map { it.professionName }.distinct().joinToString(", ")
                 add(
-                        BuyOffer(
-                            item = ItemStack(need.item, 1),
-                            displayName = need.displayLabel(),
-                            emeraldReward = price.currentPrice,
-                        neededToday = maxDailyNeed,
-                        remainingNeed = remainingNeed,
-                        maxDailyNeed = maxDailyNeed,
-                        baseValue = price.baseValue,
-                        minPrice = price.minPrice,
-                        maxPrice = price.maxPrice,
-                        demandPercent = price.availabilityPercent,
-                        demandModifier = price.availabilityModifier,
-                        demandLabel = price.availabilityLabel,
-                        dailyModifier = price.dailyModifier,
-                        grantsExperience = false,
-                        experienceReward = if (village.tier == VillageTier.HAMLET) 1 else 0,
-                        requesterCount = occupiedCount.takeIf { it > 0 } ?: count,
-                        requesterProfessionId = professionId,
-                        requesterProfession = professionDisplayName(profession)
+                    BuyOffer(
+                        item = ItemStack(representative.want.item, 1),
+                        displayName = representative.want.displayLabel(),
+                        emeraldReward = representative.exchange.emeralds,
+                        tradeItemCount = representative.exchange.itemCount,
+                        neededToday = sortedComponents.sumOf { it.dailyLimit },
+                        remainingNeed = sortedComponents.sumOf { it.remainingDaily },
+                        maxDailyNeed = sortedComponents.sumOf { it.dailyLimit },
+                        baseValue = representative.price.baseValue,
+                        minPrice = sortedComponents.minOf { it.price.minPrice },
+                        maxPrice = sortedComponents.maxOf { it.price.maxPrice },
+                        demandPercent = sortedComponents.maxOf { it.price.availabilityPercent },
+                        demandModifier = sortedComponents.maxOf { it.price.availabilityModifier },
+                        demandLabel = "Combined Demand",
+                        dailyModifier = representative.price.dailyModifier,
+                        grantsExperience = true,
+                        experienceReward = sortedComponents.maxOf { it.want.experienceReward() },
+                        requesterCount = sortedComponents.sumOf { it.requesterCount },
+                        requesterProfessionId = wantGroupKey(representative.want.item),
+                        requesterProfession = professionNames
                     )
                 )
-
-                for (want in profile.wantsForTier(village.tier)) {
-                    val wantKey = wantKey(professionId, want.item)
-                    val wantCapacity = count * want.amount
-                    if (!village.wantDemandTotalByProfession.containsKey(wantKey)) {
-                        village.wantDemandTotalByProfession[wantKey] = wantCapacity
-                        changedDemand = true
-                    }
-                    val wantBasePrice = getNeedPrice(village, want, wantCapacity, wantCapacity)
-                    val wantPrice = wantPriceWithDiminishingReturns(
-                        wantBasePrice.currentPrice,
-                        village.wantTradeCountByProfession[wantKey] ?: 0
-                    )
-                    add(
-                        BuyOffer(
-                            item = ItemStack(want.item, 1),
-                            displayName = want.displayLabel(),
-                            emeraldReward = wantPrice,
-                            neededToday = Int.MAX_VALUE,
-                            remainingNeed = Int.MAX_VALUE,
-                            maxDailyNeed = wantCapacity,
-                            baseValue = wantBasePrice.baseValue,
-                            minPrice = wantBasePrice.minPrice,
-                            maxPrice = wantBasePrice.maxPrice,
-                            demandPercent = wantBasePrice.availabilityPercent,
-                            demandModifier = wantBasePrice.availabilityModifier,
-                            demandLabel = wantBasePrice.availabilityLabel,
-                            dailyModifier = wantBasePrice.dailyModifier,
-                            grantsExperience = true,
-                            experienceReward = 1,
-                            requesterCount = occupiedCount.takeIf { it > 0 } ?: count,
-                            requesterProfessionId = wantKey,
-                            requesterProfession = professionDisplayName(profession)
-                        )
-                    )
-                }
             }
-        }.sortedWith(compareBy<BuyOffer> { !it.grantsExperience }.thenBy { it.requesterProfessionId })
+        }.sortedWith(
+            compareByDescending<BuyOffer> { it.remainingNeed }
+                .thenByDescending { it.demandPercent }
+                .thenBy { it.displayName }
+                .thenBy { it.requesterProfessionId }
+        )
 
         if (changedStock || changedDemand) {
             world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
@@ -506,7 +659,8 @@ object VillageEconomyService {
             tierName = village.tier.displayName(),
             villageExperience = village.experience,
             currentTierMinExperience = tierMinExperience(village.tier),
-            nextTierExperience = nextTierExperience(village.tier)
+            nextTierExperience = nextTierExperience(village.tier),
+            info = buildVillageInfo(village, censusSnapshot)
         )
     }
 
@@ -520,19 +674,16 @@ object VillageEconomyService {
     }
 
     private fun nextProduceProgressTicksRemaining(world: ServerWorld, village: VillageData?): Long {
-        val lastProductionTick = village?.lastProductionTick?.takeIf { it >= 0L }
-            ?: village?.lastEconomyTick?.takeIf { it >= 0L }
-            ?: world.time
-        val productionElapsedTicks = (world.time - lastProductionTick).coerceAtLeast(0L)
-        return (PRODUCE_INTERVAL_TICKS - (productionElapsedTicks % PRODUCE_INTERVAL_TICKS)).coerceAtLeast(1L)
+        val lastProductionTick = village?.lastProductionTick?.takeIf { it >= 0L } ?: return 1L
+        val elapsed = (world.time - lastProductionTick).coerceAtLeast(0L)
+        return (PEASANT_PRODUCTION_INTERVAL_TICKS - (elapsed % PEASANT_PRODUCTION_INTERVAL_TICKS)).coerceAtLeast(1L)
     }
 
     private fun nextNeedProgressTicksRemaining(world: ServerWorld, village: VillageData?): Long {
-        val lastNeedTick = village?.lastNeedTick?.takeIf { it >= 0L }
-            ?: village?.lastEconomyTick?.takeIf { it >= 0L }
-            ?: world.time
-        val needElapsedTicks = (world.time - lastNeedTick).coerceAtLeast(0L)
-        return (NEED_INTERVAL_TICKS - (needElapsedTicks % NEED_INTERVAL_TICKS)).coerceAtLeast(1L)
+        val lastNeedTick = village?.lastNeedTick?.takeIf { it >= 0L } ?: return 1L
+        val elapsed = (world.time - lastNeedTick).coerceAtLeast(0L)
+        val elapsedThisCycle = elapsed % TICKS_PER_DAY
+        return (TICKS_PER_DAY - elapsedThisCycle).coerceAtLeast(1L)
     }
 
     private fun hasInventorySpace(player: ServerPlayerEntity, item: Item, amount: Int): Boolean {
@@ -581,11 +732,107 @@ object VillageEconomyService {
         return Math.floorMod(seed, 3) - 1
     }
 
+    private fun professionMarketCounts(censusSnapshot: VillageEconomyState): ProfessionMarketCounts {
+        val professionCounts = mutableMapOf<String, Int>()
+        val occupiedProfessionCounts = mutableMapOf<String, Int>()
+        for (slot in censusSnapshot.hamletSlots) {
+            if (!slot.occupied) continue
+            val normalized = normalizeProfessionForTradeSimulation(slot.requiredProfession)
+            val professionId = Registries.VILLAGER_PROFESSION.getId(normalized).toString()
+            professionCounts[professionId] = (professionCounts[professionId] ?: 0) + 1
+            occupiedProfessionCounts[professionId] = (occupiedProfessionCounts[professionId] ?: 0) + 1
+        }
+        return ProfessionMarketCounts(professionCounts, occupiedProfessionCounts)
+    }
+
+    private fun buildVillageInfo(village: VillageData, censusSnapshot: VillageEconomyState?): VillageInfoData {
+        val slotLines = censusSnapshot?.hamletSlots
+            ?.groupingBy { slot -> professionDisplayName(slot.requiredProfession) to slot.occupied }
+            ?.eachCount()
+            ?.toList()
+            ?.sortedWith(compareBy<Pair<Pair<String, Boolean>, Int>> { it.first.first }.thenBy { if (it.first.second) 0 else 1 })
+            ?.map { (slotState, count) ->
+                val status = if (slotState.second) "filled" else "open"
+                "$count ${slotState.first} $status"
+            }
+            ?: emptyList()
+
+        val professionLines = censusSnapshot
+            ?.sortedProfessionCounts()
+            ?.map { (profession, count) -> "$count ${professionDisplayName(profession)}" }
+            ?: emptyList()
+
+        val occupiedSlots = censusSnapshot?.hamletSlots?.count { it.occupied } ?: 0
+        val totalSlots = censusSnapshot?.hamletSlots?.size ?: 0
+
+        return VillageInfoData(
+            tierName = village.tier.displayName(),
+            population = censusSnapshot?.population ?: 0,
+            activeVillagers = censusSnapshot?.activeCount ?: 0,
+            missingVillagers = censusSnapshot?.temporarilyMissingCount ?: 0,
+            deceasedVillagers = censusSnapshot?.deceasedCount ?: 0,
+            occupiedSlots = occupiedSlots,
+            totalSlots = totalSlots,
+            storageUsed = village.sellStockRemainingByProfession.values.sumOf { it.coerceAtLeast(0) },
+            storageCapacity = villageStorageCapacity(village.tier),
+            professionLines = professionLines,
+            slotLines = slotLines
+        )
+    }
+
+    private fun collectWantOfferComponents(
+        village: VillageData,
+        professionCounts: Map<String, Int>,
+        occupiedProfessionCounts: Map<String, Int>
+    ): WantOfferCollection {
+        var changedDemand = false
+        val components = buildList {
+            for ((professionId, count) in professionCounts) {
+                val profile = professionTradeProfile(professionId) ?: continue
+                val profession = professionById(professionId) ?: continue
+                val occupiedCount = occupiedProfessionCounts[professionId] ?: 0
+                for (want in profile.requestsForTier(village.tier)) {
+                    val wantKey = wantKey(professionId, want.item)
+                    val wantCapacity = count * want.amount
+                    if (!village.wantDemandTotalByProfession.containsKey(wantKey)) {
+                        village.wantDemandTotalByProfession[wantKey] = wantCapacity
+                        changedDemand = true
+                    }
+                    val wantBasePrice = getNeedPrice(village, want, wantCapacity, wantCapacity)
+                    val currentWantPrice = applyProfessionDemandPrice(
+                        price = wantBasePrice.currentPrice,
+                        professionCount = count
+                    )
+                    val alreadyTraded = village.wantTradeCountByProfession[wantKey] ?: 0
+                    val dailyLimit = wantDailyTradeLimit(currentWantPrice, want)
+                    val remainingDaily = (dailyLimit - alreadyTraded).coerceAtLeast(0)
+                    add(
+                        WantOfferComponent(
+                            professionName = professionDisplayName(profession),
+                            wantKey = wantKey,
+                            want = want,
+                            price = wantBasePrice,
+                            baseUnitPrice = currentWantPrice,
+                            currentUnitPrice = wantPriceWithDiminishingReturns(currentWantPrice, alreadyTraded),
+                            exchange = tradeExchange(want, wantPriceWithDiminishingReturns(currentWantPrice, alreadyTraded)),
+                            alreadyTraded = alreadyTraded,
+                            dailyLimit = dailyLimit,
+                            remainingDaily = remainingDaily,
+                            requesterCount = occupiedCount.takeIf { it > 0 } ?: count
+                        )
+                    )
+                }
+            }
+        }
+        return WantOfferCollection(components, changedDemand)
+    }
+
     private fun getProductPrice(
         village: VillageData,
         item: Commodity,
         stockRemaining: Int,
-        stockCapacity: Int
+        stockCapacity: Int,
+        professionCount: Int
     ): PriceBreakdown {
         val percent = percentOf(stockRemaining, stockCapacity)
         val modifier = when {
@@ -594,7 +841,8 @@ object VillageEconomyService {
             percent >= 20 -> ModifierBreakdown("Low Stock", 1)
             else -> ModifierBreakdown("Critical Stock", 2)
         }
-        return priceBreakdown(village, item, percent, modifier)
+        val price = priceBreakdown(village, item, percent, modifier)
+        return price.copy(currentPrice = applyProfessionSupplyDiscount(price.currentPrice, professionCount))
     }
 
     private fun getNeedPrice(
@@ -618,12 +866,52 @@ object VillageEconomyService {
         return (basePrice - reduction).coerceAtLeast(1)
     }
 
+    private fun wantDailyTradeLimit(basePrice: Int, request: Commodity): Int {
+        request.dailyTurnInLimit?.let { return it.coerceAtLeast(1) }
+        if (request.isNonStackable()) return NON_STACKABLE_WANT_TURN_IN_LIMIT
+        val rawLimit = ((basePrice - 1).coerceAtLeast(0) * WANT_DIMINISHING_RETURN_BUCKET_SIZE) + WANT_DAILY_FLOOR_TRADE_LIMIT
+        return ((rawLimit + WANT_DAILY_LIMIT_DIVISOR - 1) / WANT_DAILY_LIMIT_DIVISOR).coerceAtLeast(1)
+    }
+
     private fun wantTradeReward(basePrice: Int, alreadyTraded: Int, quantity: Int): Int {
         var reward = 0
         repeat(quantity.coerceAtLeast(0)) { offset ->
             reward += wantPriceWithDiminishingReturns(basePrice, alreadyTraded + offset)
         }
         return reward
+    }
+
+    private fun tradeExchange(item: Commodity, currentPrice: Int): TradeExchange {
+        if (item.isNonStackable() || currentPrice >= 4) {
+            return TradeExchange(emeralds = currentPrice.coerceAtLeast(1), itemCount = 1)
+        }
+        val itemCount = when {
+            currentPrice <= 1 -> 8
+            currentPrice == 2 -> 4
+            else -> 2
+        }.coerceAtMost(ItemStack(item.item).maxCount)
+        return TradeExchange(emeralds = 1, itemCount = itemCount.coerceAtLeast(1))
+    }
+
+    private fun tradeRewardFor(exchange: TradeExchange, baseUnitPrice: Int, alreadyTraded: Int, tradeUnits: Int): Int {
+        if (exchange.itemCount > 1) return exchange.emeralds * tradeUnits.coerceAtLeast(0)
+        return wantTradeReward(baseUnitPrice, alreadyTraded, tradeUnits)
+    }
+
+    private fun applyProfessionSupplyDiscount(price: Int, professionCount: Int): Int {
+        val discountPercent = ((effectiveProfessionPriceCount(professionCount) - 1) * PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_PER_EXTRA)
+            .coerceAtMost(PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_MAX)
+        return ((price * (100 - discountPercent)) + 99) / 100
+    }
+
+    private fun applyProfessionDemandPrice(price: Int, professionCount: Int): Int {
+        val bonusPercent = ((effectiveProfessionPriceCount(professionCount) - 1) * PROFESSION_DEMAND_PRICE_BONUS_PERCENT_PER_EXTRA)
+            .coerceAtMost(PROFESSION_DEMAND_PRICE_BONUS_PERCENT_MAX)
+        return ((price * (100 + bonusPercent)) + 99) / 100
+    }
+
+    private fun effectiveProfessionPriceCount(professionCount: Int): Int {
+        return professionCount.coerceIn(1, PROFESSION_PRICE_EFFECTIVE_COUNT_CAP)
     }
 
     private fun priceBreakdown(
@@ -658,12 +946,83 @@ object VillageEconomyService {
         return ((price * percent) + 99) / 100
     }
 
+    private fun isArtisanProfession(professionId: String): Boolean {
+        return professionId.substringAfterLast(":") in setOf(
+            "librarian",
+            "cleric",
+            "toolsmith",
+            "weaponsmith",
+            "armorer",
+            "cartographer"
+        )
+    }
+
     private fun professionCountFor(censusSnapshot: VillageEconomyState, professionId: String): Int {
         return censusSnapshot.hamletSlots.count { slot ->
             slot.occupied && Registries.VILLAGER_PROFESSION.getId(
                 normalizeProfessionForTradeSimulation(slot.requiredProfession)
             ).toString() == professionId
         }
+    }
+
+    private fun professionIdNormalizedForTrade(professionId: String): String {
+        val profession = professionById(professionId) ?: return professionId
+        return Registries.VILLAGER_PROFESSION.getId(normalizeProfessionForTradeSimulation(profession)).toString()
+    }
+
+    private fun legacyProfessionAliases(professionId: String): Set<String> {
+        return when (professionId) {
+            else -> setOf(professionId)
+        }
+    }
+
+    private fun getSellStockForProfession(
+        village: VillageData,
+        professionId: String,
+        output: Commodity
+    ): Int {
+        val normalizedKey = outputKey(professionId, output)
+        village.sellStockRemainingByProfession[normalizedKey]?.let { return it }
+
+        legacyProfessionAliases(professionId).drop(1).forEach { legacyProfessionId ->
+            val legacyKey = outputKey(legacyProfessionId, output)
+            val legacyStock = village.sellStockRemainingByProfession[legacyKey]
+            if (legacyStock != null) {
+                village.sellStockRemainingByProfession[normalizedKey] = legacyStock
+                village.sellStockRemainingByProfession.remove(legacyKey)
+                val legacyTick = village.artisanRefillTickByProfession[legacyKey]
+                if (legacyTick != null) {
+                    village.artisanRefillTickByProfession.remove(legacyKey)
+                    village.artisanRefillTickByProfession[normalizedKey] = legacyTick
+                }
+                return legacyStock
+            }
+        }
+
+        return 0
+    }
+
+    private fun resolveSellStockKey(
+        village: VillageData,
+        professionId: String,
+        output: Commodity,
+        originalProfessionId: String
+    ): String {
+        val normalizedKey = outputKey(professionId, output)
+        if (village.sellStockRemainingByProfession.containsKey(normalizedKey)) return normalizedKey
+
+        val legacyKey = outputKey(originalProfessionId, output)
+        val legacyStock = village.sellStockRemainingByProfession[legacyKey]
+        if (professionId != originalProfessionId && legacyStock != null) {
+            village.sellStockRemainingByProfession[normalizedKey] = legacyStock
+            village.sellStockRemainingByProfession.remove(legacyKey)
+            val legacyTick = village.artisanRefillTickByProfession[legacyKey]
+            if (legacyTick != null) {
+                village.artisanRefillTickByProfession.remove(legacyKey)
+                village.artisanRefillTickByProfession[normalizedKey] = legacyTick
+            }
+        }
+        return normalizedKey
     }
 
     private fun economyItemIds(): Set<String> {
@@ -673,12 +1032,14 @@ object VillageEconomyService {
             "minecraft:mason",
             "minecraft:fletcher",
             "minecraft:butcher",
+            "minecraft:leatherworker",
             "minecraft:fisherman",
             "minecraft:toolsmith",
             "minecraft:weaponsmith",
             "minecraft:armorer",
             "minecraft:cleric",
-            "minecraft:librarian"
+            "minecraft:librarian",
+            "minecraft:cartographer"
         ).mapNotNull { professionTradeProfileByProfession(it) }
             .flatMap { it.allCommodities().map { commodity -> commodity.item } }
             .map { itemIdOf(it) }
@@ -686,8 +1047,14 @@ object VillageEconomyService {
     }
 
     private fun wantKey(professionId: String, item: Item): String = "$WANT_KEY_PREFIX$professionId|${itemIdOf(item)}"
+    private fun wantGroupKey(item: Item): String = "$WANT_GROUP_KEY_PREFIX${itemIdOf(item)}"
     private fun outputKey(professionId: String, item: Item): String = "$OUTPUT_KEY_PREFIX$professionId|${itemIdOf(item)}"
     private fun outputKey(professionId: String, commodity: Commodity): String = "$OUTPUT_KEY_PREFIX$professionId|${commodity.keyItemId()}"
+
+    private fun itemIdFromWantGroupKey(wantGroupKey: String): String? {
+        if (!wantGroupKey.startsWith(WANT_GROUP_KEY_PREFIX)) return null
+        return wantGroupKey.removePrefix(WANT_GROUP_KEY_PREFIX).takeIf { it.isNotBlank() }
+    }
 
     private fun professionIdFromWantKey(wantKey: String): String? {
         if (!wantKey.startsWith(WANT_KEY_PREFIX)) return null
@@ -734,16 +1101,25 @@ object VillageEconomyService {
         }
     }
 
+    private fun villageStorageCapacity(tier: VillageTier): Int {
+        return when (tier) {
+            VillageTier.HAMLET -> 128
+            VillageTier.SETTLEMENT -> 256
+            VillageTier.VILLAGE -> 512
+            VillageTier.TOWN -> 768
+            VillageTier.CITY -> 1024
+        }
+    }
+
     private fun VillageTier.displayName(): String {
         return name.lowercase(Locale.ROOT).replaceFirstChar { it.uppercase() }
     }
 
     private fun itemIdOf(item: Item): String = Registries.ITEM.getId(item).toString()
+    private fun itemById(itemId: String): Item = Registries.ITEM.get(Identifier.of("minecraft", itemId))
 
     private fun normalizeProfessionForTradeSimulation(profession: net.minecraft.village.VillagerProfession): net.minecraft.village.VillagerProfession {
-        val professionId = Registries.VILLAGER_PROFESSION.getId(profession).toString()
-        if (professionId != LEATHERWORKER_ID) return profession
-        return professionById(BUTCHER_ID) ?: profession
+        return profession
     }
 
     private fun professionById(professionId: String): net.minecraft.village.VillagerProfession? {
@@ -764,12 +1140,14 @@ object VillageEconomyService {
             "mason" -> professionTradeProfileByProfession("minecraft:mason")
             "fletcher" -> professionTradeProfileByProfession("minecraft:fletcher")
             "butcher" -> professionTradeProfileByProfession("minecraft:butcher")
+            "leatherworker" -> professionTradeProfileByProfession("minecraft:leatherworker")
             "fisherman" -> professionTradeProfileByProfession("minecraft:fisherman")
             "toolsmith" -> professionTradeProfileByProfession("minecraft:toolsmith")
             "weaponsmith" -> professionTradeProfileByProfession("minecraft:weaponsmith")
             "armorer" -> professionTradeProfileByProfession("minecraft:armorer")
             "cleric" -> professionTradeProfileByProfession("minecraft:cleric")
             "librarian" -> professionTradeProfileByProfession("minecraft:librarian")
+            "cartographer" -> professionTradeProfileByProfession("minecraft:cartographer")
             else -> null
         }
     }
@@ -777,78 +1155,198 @@ object VillageEconomyService {
     private fun professionTradeProfileByProfession(professionId: String): ProfessionTradeProfile? {
         return when (professionId.substringAfterLast(":").lowercase(Locale.ROOT)) {
             "farmer" -> ProfessionTradeProfile(
-                hamletOutputs = listOf(Commodity(Items.WHEAT, FARMER_DAILY_OUTPUT_CAP, baseValue = 2, minPrice = 1, maxPrice = 3)),
-                need = Commodity(Items.COAL, 5, baseValue = 3, minPrice = 2, maxPrice = 5),
-                settlementOutputs = listOf(
+                hamletOutputs = listOf(
+                    Commodity(Items.WHEAT, 10, baseValue = 2, minPrice = 1, maxPrice = 3),
+                    Commodity(Items.BREAD, 6, baseValue = 3, minPrice = 2, maxPrice = 5),
                     Commodity(Items.CARROT, 10, baseValue = 2, minPrice = 1, maxPrice = 4),
-                    Commodity(Items.POTATO, 10, baseValue = 2, minPrice = 1, maxPrice = 4)
+                    Commodity(Items.POTATO, 10, baseValue = 2, minPrice = 1, maxPrice = 4),
+                    Commodity(Items.BEETROOT, 10, baseValue = 2, minPrice = 1, maxPrice = 4)
                 ),
-                villageOutputs = listOf(Commodity(Items.PAPER, 10, baseValue = 3, minPrice = 2, maxPrice = 5)),
-                townOutputs = listOf(Commodity(Items.MELON_SLICE, 10, baseValue = 3, minPrice = 2, maxPrice = 5)),
-                cityOutputs = listOf(Commodity(Items.GOLDEN_CARROT, 10, baseValue = 6, minPrice = 4, maxPrice = 9)),
-                settlementWant = Commodity(Items.BONE_MEAL, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
-                villageWant = Commodity(Items.BOOK, 1, baseValue = 4, minPrice = 2, maxPrice = 6),
-                townWant = Commodity(Items.DIAMOND_HOE, 1, baseValue = 8, minPrice = 5, maxPrice = 12)
+                need = Commodity(Items.IRON_HOE, 1, baseValue = 5, minPrice = 3, maxPrice = 8),
+                extraNeeds = listOf(
+                    Commodity(Items.BONE_MEAL, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.WATER_BUCKET, 1, baseValue = 6, minPrice = 4, maxPrice = 10)
+                ),
+                settlementOutputs = listOf(
+                    Commodity(Items.PUMPKIN, 8, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(itemById("melon"), 8, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.HAY_BLOCK, 4, baseValue = 5, minPrice = 3, maxPrice = 8)
+                ),
+                villageOutputs = listOf(
+                    Commodity(Items.COOKIE, 12, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.PUMPKIN_PIE, 4, baseValue = 5, minPrice = 3, maxPrice = 8)
+                ),
+                townOutputs = listOf(Commodity(Items.GOLDEN_CARROT, 6, baseValue = 8, minPrice = 5, maxPrice = 12)),
+                cityOutputs = listOf(
+                    Commodity(Items.SUSPICIOUS_STEW, 3, baseValue = 8, minPrice = 5, maxPrice = 12),
+                    Commodity(Items.GOLDEN_CARROT, 16, baseValue = 8, minPrice = 5, maxPrice = 12)
+                )
             )
             "shepherd" -> ProfessionTradeProfile(
-                hamletOutputs = listOf(Commodity(Items.WHITE_WOOL, 10, baseValue = 3, minPrice = 2, maxPrice = 5)),
-                need = Commodity(Items.OAK_LOG, 5, baseValue = 3, minPrice = 2, maxPrice = 5),
-                settlementOutputs = listOf(Commodity(Items.STRING, 10, baseValue = 2, minPrice = 1, maxPrice = 4)),
-                villageOutputs = listOf(Commodity(Items.LEATHER, 10, baseValue = 5, minPrice = 3, maxPrice = 6)),
-                townOutputs = listOf(Commodity(Items.HONEY_BOTTLE, 10, baseValue = 4, minPrice = 2, maxPrice = 7)),
-                cityOutputs = listOf(Commodity(Items.HORSE_SPAWN_EGG, 3, baseValue = 10, minPrice = 6, maxPrice = 16)),
-                settlementWant = Commodity(Items.OAK_PLANKS, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
-                villageWant = Commodity(Items.SHEARS, 1, baseValue = 4, minPrice = 2, maxPrice = 6),
-                townWant = Commodity(Items.DIAMOND_CHESTPLATE, 1, baseValue = 12, minPrice = 8, maxPrice = 18)
+                hamletOutputs = listOf(
+                    Commodity(Items.WHITE_WOOL, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.GRAY_WOOL, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.BLACK_WOOL, 10, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                need = Commodity(Items.WHEAT, 1, baseValue = 2, minPrice = 1, maxPrice = 3),
+                extraNeeds = listOf(
+                    Commodity(Items.SHEARS, 1, baseValue = 4, minPrice = 2, maxPrice = 6),
+                    Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(Items.HAY_BLOCK, 1, baseValue = 5, minPrice = 3, maxPrice = 8)
+                ),
+                settlementOutputs = listOf(
+                    Commodity(Items.RED_WOOL, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.BLUE_WOOL, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.STRING, 10, baseValue = 2, minPrice = 1, maxPrice = 4)
+                ),
+                villageOutputs = listOf(
+                    Commodity(Items.WHITE_CARPET, 12, baseValue = 2, minPrice = 1, maxPrice = 4),
+                    Commodity(Items.WHITE_BED, 2, baseValue = 7, minPrice = 4, maxPrice = 11)
+                ),
+                townOutputs = listOf(Commodity(Items.WHITE_BANNER, 4, baseValue = 6, minPrice = 3, maxPrice = 10)),
+                cityOutputs = listOf(
+                    Commodity(Items.WHITE_BANNER, 8, baseValue = 6, minPrice = 3, maxPrice = 10),
+                    Commodity(Items.BLACK_BANNER, 8, baseValue = 6, minPrice = 3, maxPrice = 10)
+                )
             )
             "mason" -> ProfessionTradeProfile(
-                hamletOutputs = listOf(Commodity(Items.COAL, 10, baseValue = 3, minPrice = 2, maxPrice = 5)),
-                need = Commodity(Items.WHEAT, 5, baseValue = 2, minPrice = 1, maxPrice = 3),
-                settlementOutputs = listOf(Commodity(Items.IRON_INGOT, 10, baseValue = 5, minPrice = 3, maxPrice = 7)),
-                villageOutputs = listOf(Commodity(Items.GOLD_INGOT, 10, baseValue = 6, minPrice = 4, maxPrice = 9)),
-                townOutputs = listOf(Commodity(Items.DIAMOND, 10, baseValue = 8, minPrice = 5, maxPrice = 12)),
-                cityOutputs = listOf(Commodity(Items.NETHERITE_SCRAP, 1, baseValue = 12, minPrice = 8, maxPrice = 18)),
-                settlementWant = Commodity(Items.FLINT, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
-                villageWant = Commodity(Items.IRON_HELMET, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
-                townWant = Commodity(Items.DIAMOND_PICKAXE, 1, baseValue = 10, minPrice = 6, maxPrice = 14)
+                hamletOutputs = listOf(
+                    Commodity(Items.COAL, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.COBBLESTONE, 16, baseValue = 1, minPrice = 1, maxPrice = 2),
+                    Commodity(Items.STONE, 16, baseValue = 2, minPrice = 1, maxPrice = 3),
+                    Commodity(Items.GRAVEL, 16, baseValue = 1, minPrice = 1, maxPrice = 2)
+                ),
+                need = Commodity(Items.BREAD, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                extraNeeds = listOf(
+                    Commodity(Items.TORCH, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                    Commodity(Items.IRON_PICKAXE, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
+                    Commodity(Items.OAK_LOG, 1, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                settlementOutputs = listOf(
+                    Commodity(Items.IRON_ORE, 8, baseValue = 5, minPrice = 3, maxPrice = 8),
+                    Commodity(Items.COPPER_ORE, 8, baseValue = 4, minPrice = 2, maxPrice = 7)
+                ),
+                villageOutputs = listOf(
+                    Commodity(Items.IRON_INGOT, 10, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(Items.COPPER_INGOT, 10, baseValue = 4, minPrice = 2, maxPrice = 7),
+                    Commodity(Items.TUFF, 16, baseValue = 2, minPrice = 1, maxPrice = 3)
+                ),
+                townOutputs = listOf(
+                    Commodity(Items.GOLD_ORE, 6, baseValue = 6, minPrice = 4, maxPrice = 10),
+                    Commodity(Items.GOLD_INGOT, 8, baseValue = 6, minPrice = 4, maxPrice = 9)
+                ),
+                cityOutputs = listOf(
+                    Commodity(Items.IRON_INGOT, 32, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(Items.COPPER_INGOT, 32, baseValue = 4, minPrice = 2, maxPrice = 7)
+                )
             )
             "fletcher" -> ProfessionTradeProfile(
-                hamletOutputs = listOf(Commodity(Items.OAK_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5)),
-                need = Commodity(Items.WHEAT, 5, baseValue = 2, minPrice = 1, maxPrice = 3),
-                settlementOutputs = listOf(Commodity(Items.OAK_PLANKS, 10, baseValue = 2, minPrice = 1, maxPrice = 4)),
-                villageOutputs = listOf(Commodity(Items.STICK, 10, baseValue = 1, minPrice = 1, maxPrice = 3)),
-                townOutputs = listOf(Commodity(Items.APPLE, 10, baseValue = 3, minPrice = 2, maxPrice = 5)),
-                cityOutputs = listOf(Commodity(Items.ENCHANTED_GOLDEN_APPLE, 1, baseValue = 16, minPrice = 10, maxPrice = 24)),
-                settlementWant = Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
-                villageWant = Commodity(Items.IRON_AXE, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
-                townWant = Commodity(Items.DIAMOND_AXE, 1, baseValue = 10, minPrice = 6, maxPrice = 14)
+                hamletOutputs = listOf(
+                    Commodity(Items.OAK_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.SPRUCE_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                need = Commodity(Items.IRON_AXE, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
+                extraNeeds = listOf(
+                    Commodity(Items.BREAD, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                settlementOutputs = listOf(
+                    Commodity(Items.BIRCH_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.JUNGLE_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.ACACIA_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                villageOutputs = listOf(
+                    Commodity(Items.MANGROVE_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.CHERRY_LOG, 10, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                townOutputs = listOf(
+                    Commodity(Items.BAMBOO_BLOCK, 12, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.OAK_PLANKS, 16, baseValue = 2, minPrice = 1, maxPrice = 4)
+                ),
+                cityOutputs = listOf(
+                    Commodity(Items.OAK_LOG, 32, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.SPRUCE_LOG, 32, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.BIRCH_LOG, 32, baseValue = 3, minPrice = 2, maxPrice = 5)
+                )
             )
             "butcher" -> ProfessionTradeProfile(
-                hamletOutputs = listOf(Commodity(Items.BEEF, 10, baseValue = 4, minPrice = 2, maxPrice = 6)),
-                need = Commodity(Items.COAL, 5, baseValue = 3, minPrice = 2, maxPrice = 5),
-                settlementOutputs = listOf(Commodity(Items.BONE_MEAL, 10, baseValue = 2, minPrice = 1, maxPrice = 4)),
-                villageOutputs = listOf(Commodity(Items.BLAZE_POWDER, 10, baseValue = 6, minPrice = 3, maxPrice = 9)),
-                townOutputs = listOf(Commodity(Items.GUNPOWDER, 10, baseValue = 5, minPrice = 3, maxPrice = 8)),
-                cityOutputs = listOf(Commodity(Items.ELYTRA, 1, baseValue = 24, minPrice = 16, maxPrice = 32)),
-                settlementWant = Commodity(Items.CARROT, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
-                villageWant = Commodity(Items.IRON_SWORD, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
-                townWant = Commodity(Items.DIAMOND_SWORD, 1, baseValue = 10, minPrice = 6, maxPrice = 14)
+                hamletOutputs = listOf(
+                    Commodity(Items.BEEF, 10, baseValue = 4, minPrice = 2, maxPrice = 6),
+                    Commodity(Items.PORKCHOP, 10, baseValue = 4, minPrice = 2, maxPrice = 6),
+                    Commodity(Items.CHICKEN, 10, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                need = Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                extraNeeds = listOf(
+                    Commodity(Items.WHEAT, 1, baseValue = 2, minPrice = 1, maxPrice = 3),
+                    Commodity(Items.CARROT, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                    Commodity(Items.BUCKET, 1, baseValue = 5, minPrice = 3, maxPrice = 8)
+                ),
+                settlementOutputs = listOf(
+                    Commodity(Items.COOKED_BEEF, 8, baseValue = 5, minPrice = 3, maxPrice = 8),
+                    Commodity(Items.COOKED_PORKCHOP, 8, baseValue = 5, minPrice = 3, maxPrice = 8)
+                ),
+                villageOutputs = listOf(
+                    Commodity(Items.COOKED_CHICKEN, 8, baseValue = 4, minPrice = 2, maxPrice = 7),
+                    Commodity(Items.RABBIT, 6, baseValue = 4, minPrice = 2, maxPrice = 7)
+                ),
+                townOutputs = listOf(Commodity(Items.RABBIT_STEW, 3, baseValue = 7, minPrice = 4, maxPrice = 11)),
+                cityOutputs = listOf(
+                    Commodity(Items.COOKED_BEEF, 24, baseValue = 5, minPrice = 3, maxPrice = 8),
+                    Commodity(Items.COOKED_PORKCHOP, 24, baseValue = 5, minPrice = 3, maxPrice = 8),
+                    Commodity(Items.COOKED_CHICKEN, 24, baseValue = 4, minPrice = 2, maxPrice = 7)
+                )
+            )
+            "leatherworker" -> ProfessionTradeProfile(
+                hamletOutputs = listOf(
+                    Commodity(Items.LEATHER, 10, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(Items.LEATHER_HELMET, 1, baseValue = 5, minPrice = 3, maxPrice = 8),
+                    Commodity(Items.LEATHER_CHESTPLATE, 1, baseValue = 7, minPrice = 4, maxPrice = 10),
+                    Commodity(Items.LEATHER_LEGGINGS, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
+                    Commodity(Items.LEATHER_BOOTS, 1, baseValue = 4, minPrice = 2, maxPrice = 7)
+                ),
+                need = Commodity(Items.LEATHER, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                extraNeeds = listOf(
+                    Commodity(Items.STRING, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                    Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7)
+                ),
+                settlementOutputs = listOf(Commodity(Items.SADDLE, 1, baseValue = 12, minPrice = 8, maxPrice = 18)),
+                villageOutputs = listOf(Commodity(Items.ITEM_FRAME, 4, baseValue = 4, minPrice = 2, maxPrice = 7)),
+                townOutputs = listOf(Commodity(itemById("bundle"), 1, baseValue = 10, minPrice = 6, maxPrice = 15)),
+                cityOutputs = listOf(
+                    Commodity(Items.LEATHER, 32, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(itemById("bundle"), 4, baseValue = 10, minPrice = 6, maxPrice = 15)
+                )
             )
             "fisherman" -> ProfessionTradeProfile(
                 hamletOutputs = listOf(
                     Commodity(Items.COD, 10, baseValue = 3, minPrice = 2, maxPrice = 5),
                     Commodity(Items.SALMON, 10, baseValue = 3, minPrice = 2, maxPrice = 5)
                 ),
-                need = Commodity(Items.LEATHER, 5, baseValue = 5, minPrice = 3, maxPrice = 6),
-                settlementOutputs = listOf(Commodity(Items.FLINT, 10, baseValue = 2, minPrice = 1, maxPrice = 4)),
-                townOutputs = listOf(Commodity(Items.PUFFERFISH, 5, baseValue = 5, minPrice = 3, maxPrice = 8)),
-                cityOutputs = listOf(Commodity(Items.SPONGE, 10, baseValue = 8, minPrice = 5, maxPrice = 12)),
-                settlementWant = Commodity(Items.STRING, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
-                villageWant = Commodity(Items.FISHING_ROD, 1, baseValue = 4, minPrice = 2, maxPrice = 6),
-                townWant = Commodity(Items.POTION, 1, baseValue = 8, minPrice = 5, maxPrice = 12)
+                need = Commodity(Items.STRING, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                extraNeeds = listOf(
+                    Commodity(Items.OAK_LOG, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5)
+                ),
+                settlementOutputs = listOf(
+                    Commodity(Items.COOKED_COD, 8, baseValue = 4, minPrice = 2, maxPrice = 6),
+                    Commodity(Items.COOKED_SALMON, 8, baseValue = 4, minPrice = 2, maxPrice = 6)
+                ),
+                villageOutputs = listOf(
+                    Commodity(Items.TROPICAL_FISH, 6, baseValue = 4, minPrice = 2, maxPrice = 7),
+                    Commodity(Items.PUFFERFISH, 5, baseValue = 5, minPrice = 3, maxPrice = 8)
+                ),
+                townOutputs = listOf(
+                    Commodity(Items.OAK_BOAT, 2, baseValue = 5, minPrice = 3, maxPrice = 8),
+                    Commodity(Items.BARREL, 4, baseValue = 4, minPrice = 2, maxPrice = 7)
+                ),
+                cityOutputs = listOf(
+                    Commodity(Items.COD, 32, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.SALMON, 32, baseValue = 3, minPrice = 2, maxPrice = 5)
+                )
             )
             "toolsmith" -> ProfessionTradeProfile(
-                need = Commodity(Items.OAK_LOG, 5, baseValue = 3, minPrice = 2, maxPrice = 5),
+                need = null,
                 villageOutputs = listOf(
                     Commodity(Items.IRON_PICKAXE, 1, baseValue = 6, minPrice = 3, maxPrice = 9, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
                     Commodity(Items.IRON_AXE, 1, baseValue = 6, minPrice = 3, maxPrice = 9, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
@@ -858,32 +1356,41 @@ object VillageEconomyService {
                     Commodity(Items.SHEARS, 1, baseValue = 4, minPrice = 2, maxPrice = 6, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
                 ),
                 townOutputs = listOf(
-                    Commodity(Items.DIAMOND_PICKAXE, 1, baseValue = 10, minPrice = 6, maxPrice = 14, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.DIAMOND_AXE, 1, baseValue = 10, minPrice = 6, maxPrice = 14, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.DIAMOND_SHOVEL, 1, baseValue = 9, minPrice = 5, maxPrice = 13, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.DIAMOND_HOE, 1, baseValue = 9, minPrice = 5, maxPrice = 13, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
+                    Commodity(Items.DIAMOND_PICKAXE, 1, baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.DIAMOND_AXE, 1, baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
                 ),
                 cityOutputs = listOf(enchantedBookCommodity("mending", baseValue = 12, minPrice = 8, maxPrice = 18, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)),
-                villageWant = Commodity(Items.STICK, 1, baseValue = 1, minPrice = 1, maxPrice = 3),
-                townWant = Commodity(Items.DIAMOND, 1, baseValue = 8, minPrice = 5, maxPrice = 12)
+                villageWant = Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                extraVillageWants = listOf(
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.OAK_LOG, 1, baseValue = 3, minPrice = 2, maxPrice = 5)
+                )
             )
             "weaponsmith" -> ProfessionTradeProfile(
-                need = Commodity(Items.OAK_LOG, 5, baseValue = 3, minPrice = 2, maxPrice = 5),
+                need = null,
                 villageOutputs = listOf(
                     Commodity(Items.IRON_SWORD, 1, baseValue = 6, minPrice = 3, maxPrice = 9, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.BOW, 1, baseValue = 5, minPrice = 3, maxPrice = 8, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.ARROW, 16, baseValue = 3, minPrice = 2, maxPrice = 5, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
+                    Commodity(Items.IRON_AXE, 1, baseValue = 6, minPrice = 3, maxPrice = 9, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
+                ),
+                townOutputs = listOf(
+                    Commodity(Items.DIAMOND_SWORD, 1, baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.BOW, 1, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.CROSSBOW, 1, baseValue = 10, minPrice = 6, maxPrice = 16, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
                 ),
                 cityOutputs = listOf(
-                    Commodity(Items.DIAMOND_SWORD, 1, baseValue = 10, minPrice = 6, maxPrice = 14, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.CROSSBOW, 1, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
-                    enchantedBookCommodity("sharpness", baseValue = 12, minPrice = 8, maxPrice = 18, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
+                    enchantedBookCommodity("sharpness", baseValue = 22, minPrice = 14, maxPrice = 34, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("power", baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("infinity", baseValue = 20, minPrice = 14, maxPrice = 30, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
                 ),
-                villageWant = Commodity(Items.STICK, 1, baseValue = 1, minPrice = 1, maxPrice = 3),
-                townWant = Commodity(Items.DIAMOND, 1, baseValue = 8, minPrice = 5, maxPrice = 12)
+                villageWant = Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                extraVillageWants = listOf(
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.OAK_LOG, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.STRING, 1, baseValue = 2, minPrice = 1, maxPrice = 4)
+                )
             )
             "armorer" -> ProfessionTradeProfile(
-                need = Commodity(Items.WOODEN_PICKAXE, 5, baseValue = 4, minPrice = 2, maxPrice = 6),
+                need = null,
                 villageOutputs = listOf(
                     Commodity(Items.IRON_HELMET, 1, baseValue = 6, minPrice = 3, maxPrice = 9, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
                     Commodity(Items.IRON_CHESTPLATE, 1, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
@@ -891,32 +1398,99 @@ object VillageEconomyService {
                     Commodity(Items.IRON_BOOTS, 1, baseValue = 5, minPrice = 3, maxPrice = 8, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
                 ),
                 townOutputs = listOf(
-                    Commodity(Items.DIAMOND_HELMET, 1, baseValue = 10, minPrice = 6, maxPrice = 14, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.DIAMOND_CHESTPLATE, 1, baseValue = 12, minPrice = 8, maxPrice = 18, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.DIAMOND_LEGGINGS, 1, baseValue = 11, minPrice = 7, maxPrice = 16, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
-                    Commodity(Items.DIAMOND_BOOTS, 1, baseValue = 9, minPrice = 5, maxPrice = 13, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
+                    Commodity(Items.DIAMOND_HELMET, 1, baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.DIAMOND_CHESTPLATE, 1, baseValue = 26, minPrice = 18, maxPrice = 38, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.DIAMOND_LEGGINGS, 1, baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.DIAMOND_BOOTS, 1, baseValue = 16, minPrice = 10, maxPrice = 24, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
+                ),
+                cityOutputs = listOf(
+                    enchantedBookCommodity("protection", baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("unbreaking", baseValue = 20, minPrice = 14, maxPrice = 30, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("feather_falling", baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("respiration", baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("aqua_affinity", baseValue = 16, minPrice = 10, maxPrice = 24, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
                 ),
                 specialOutputs = ::armorerOutputsForTier,
-                villageWant = Commodity(Items.LEATHER, 1, baseValue = 5, minPrice = 3, maxPrice = 6),
-                townWant = Commodity(Items.DIAMOND, 1, baseValue = 8, minPrice = 5, maxPrice = 12)
+                villageWant = Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                extraVillageWants = listOf(
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.LEATHER, 1, baseValue = 5, minPrice = 3, maxPrice = 7)
+                )
             )
             "cleric" -> ProfessionTradeProfile(
-                need = Commodity(Items.WHEAT, 5, baseValue = 2, minPrice = 1, maxPrice = 3),
+                need = null,
                 specialOutputs = ::clericOutputsForTier,
-                cityOutputs = listOf(Commodity(Items.EXPERIENCE_BOTTLE, 10, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)),
-                villageWant = Commodity(Items.BLAZE_POWDER, 1, baseValue = 6, minPrice = 3, maxPrice = 9),
-                townWant = Commodity(Items.PUFFERFISH, 1, baseValue = 5, minPrice = 3, maxPrice = 8)
+                villageOutputs = listOf(
+                    Commodity(Items.REDSTONE, 8, baseValue = 4, minPrice = 2, maxPrice = 7, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.GLOWSTONE_DUST, 8, baseValue = 5, minPrice = 3, maxPrice = 8, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
+                ),
+                townOutputs = listOf(
+                    Commodity(Items.BREWING_STAND, 1, baseValue = 12, minPrice = 8, maxPrice = 18, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.GLASS_BOTTLE, 12, baseValue = 2, minPrice = 1, maxPrice = 4, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
+                ),
+                cityOutputs = listOf(
+                    Commodity(Items.EXPERIENCE_BOTTLE, 8, baseValue = 12, minPrice = 8, maxPrice = 18, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.ENDER_PEARL, 2, baseValue = 14, minPrice = 10, maxPrice = 22, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.REDSTONE, 32, baseValue = 4, minPrice = 2, maxPrice = 7, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
+                ),
+                villageWant = Commodity(Items.GLASS_BOTTLE, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                extraVillageWants = listOf(
+                    Commodity(Items.REDSTONE, 1, baseValue = 4, minPrice = 2, maxPrice = 7),
+                    Commodity(Items.COAL, 1, baseValue = 3, minPrice = 2, maxPrice = 5),
+                    Commodity(Items.GOLD_INGOT, 1, baseValue = 6, minPrice = 4, maxPrice = 9)
+                )
             )
             "librarian" -> ProfessionTradeProfile(
-                need = Commodity(Items.WHEAT, 5, baseValue = 2, minPrice = 1, maxPrice = 3),
-                villageOutputs = listOf(Commodity(Items.BOOK, 10, baseValue = 4, minPrice = 2, maxPrice = 6, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)),
+                need = null,
+                villageOutputs = listOf(
+                    Commodity(Items.BOOK, 10, baseValue = 4, minPrice = 2, maxPrice = 6, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.BOOKSHELF, 2, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.PAPER, 12, baseValue = 2, minPrice = 1, maxPrice = 4, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
+                ),
+                townOutputs = listOf(Commodity(Items.LANTERN, 4, baseValue = 5, minPrice = 3, maxPrice = 8, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)),
                 specialOutputs = ::librarianOutputsForTier,
                 cityOutputs = listOf(
-                    Commodity(Items.BOOKSHELF, 1, baseValue = 16, minPrice = 10, maxPrice = 24, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
-                    enchantedBookCommodity("protection", baseValue = 14, minPrice = 9, maxPrice = 20, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
+                    enchantedBookCommodity("mending", baseValue = 28, minPrice = 18, maxPrice = 42, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("unbreaking", baseValue = 22, minPrice = 14, maxPrice = 34, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("efficiency", baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("fortune", baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("silk_touch", baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("protection", baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("sharpness", baseValue = 24, minPrice = 16, maxPrice = 36, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("power", baseValue = 20, minPrice = 14, maxPrice = 32, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("infinity", baseValue = 22, minPrice = 14, maxPrice = 34, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("respiration", baseValue = 18, minPrice = 12, maxPrice = 28, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    enchantedBookCommodity("aqua_affinity", baseValue = 16, minPrice = 10, maxPrice = 24, productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
                 ),
                 villageWant = Commodity(Items.PAPER, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
-                townWant = Commodity(Items.APPLE, 1, baseValue = 3, minPrice = 2, maxPrice = 5)
+                extraVillageWants = listOf(
+                    Commodity(Items.BOOK, 1, baseValue = 4, minPrice = 2, maxPrice = 6),
+                    Commodity(Items.LEATHER, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(Items.EMERALD, 1, baseValue = 8, minPrice = 5, maxPrice = 12)
+                )
+            )
+            "cartographer" -> ProfessionTradeProfile(
+                need = null,
+                villageOutputs = listOf(
+                    Commodity(Items.MAP, 4, baseValue = 4, minPrice = 2, maxPrice = 7, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.FILLED_MAP, 1, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.COMPASS, 1, baseValue = 8, minPrice = 5, maxPrice = 12, productPricePercent = ARTISAN_VILLAGE_PRODUCT_PRICE_PERCENT)
+                ),
+                townOutputs = listOf(
+                    Commodity(Items.FLOWER_BANNER_PATTERN, 1, baseValue = 10, minPrice = 6, maxPrice = 15, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.ITEM_FRAME, 4, baseValue = 4, minPrice = 2, maxPrice = 7, productPricePercent = ARTISAN_TOWN_PRODUCT_PRICE_PERCENT)
+                ),
+                cityOutputs = listOf(
+                    Commodity(Items.FILLED_MAP, 1, baseValue = 18, minPrice = 12, maxPrice = 28, variantId = "minecraft:filled_map#ocean_explorer", displayName = "Ocean Explorer Map", productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.FILLED_MAP, 1, baseValue = 18, minPrice = 12, maxPrice = 28, variantId = "minecraft:filled_map#woodland_explorer", displayName = "Woodland Explorer Map", productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT),
+                    Commodity(Items.FILLED_MAP, 1, baseValue = 20, minPrice = 14, maxPrice = 32, variantId = "minecraft:filled_map#trial_explorer", displayName = "Trial Explorer Map", productPricePercent = ARTISAN_CITY_PRODUCT_PRICE_PERCENT)
+                ),
+                villageWant = Commodity(Items.PAPER, 1, baseValue = 2, minPrice = 1, maxPrice = 4),
+                extraVillageWants = listOf(
+                    Commodity(Items.COMPASS, 1, baseValue = 8, minPrice = 5, maxPrice = 12),
+                    Commodity(Items.IRON_INGOT, 1, baseValue = 5, minPrice = 3, maxPrice = 7),
+                    Commodity(Items.REDSTONE, 1, baseValue = 4, minPrice = 2, maxPrice = 7)
+                )
             )
             else -> null
         }
@@ -932,11 +1506,16 @@ object VillageEconomyService {
         val displayName: String? = null,
         val enchantmentId: String? = null,
         val potionId: String? = null,
-        val productPricePercent: Int = NORMAL_PRODUCT_PRICE_PERCENT
+        val productPricePercent: Int = NORMAL_PRODUCT_PRICE_PERCENT,
+        val dailyTurnInLimit: Int? = null
     ) {
         val itemName: String = item.toString()
 
         fun keyItemId(): String = variantId ?: itemIdOf(item)
+
+        fun isNonStackable(): Boolean = ItemStack(item).maxCount <= 1
+
+        fun experienceReward(): Int = if (isNonStackable()) NON_STACKABLE_WANT_XP_REWARD else 1
 
         fun stack(world: ServerWorld, count: Int = 1): ItemStack {
             val stack = if (item == Items.ENCHANTED_BOOK && enchantmentId != null) {
@@ -973,8 +1552,16 @@ object VillageEconomyService {
         val dailyModifier: Int
     )
 
+    private data class TradeExchange(
+        val emeralds: Int,
+        val itemCount: Int
+    ) {
+        fun valuePerItemScaled(): Int = (emeralds * 1000) / itemCount.coerceAtLeast(1)
+    }
+
     private data class ProfessionTradeProfile(
         val need: Commodity?,
+        val extraNeeds: List<Commodity> = emptyList(),
         val hamletOutputs: List<Commodity> = emptyList(),
         val settlementOutputs: List<Commodity> = emptyList(),
         val villageOutputs: List<Commodity> = emptyList(),
@@ -983,6 +1570,7 @@ object VillageEconomyService {
         val specialOutputs: ((VillageTier, VillageData) -> List<Commodity>)? = null,
         val settlementWant: Commodity? = null,
         val villageWant: Commodity? = null,
+        val extraVillageWants: List<Commodity> = emptyList(),
         val townWant: Commodity? = null,
         val cityWant: Commodity? = null
     ) {
@@ -999,17 +1587,30 @@ object VillageEconomyService {
 
         fun allCommodities(): List<Commodity> {
             return hamletOutputs + settlementOutputs + villageOutputs + townOutputs + cityOutputs +
-                listOfNotNull(need, settlementWant, villageWant, townWant, cityWant)
+                listOfNotNull(need, settlementWant, villageWant, townWant, cityWant) + extraNeeds + extraVillageWants +
+                listOf(bookVillageWant())
+        }
+
+        fun requestsForTier(tier: VillageTier): List<Commodity> {
+            return listOfNotNull(need) + extraNeeds + wantsForTier(tier)
         }
 
         fun wantsForTier(tier: VillageTier): List<Commodity> {
             val wants = mutableListOf<Commodity>()
             if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) settlementWant?.let(wants::add)
-            if (tier.ordinal >= VillageTier.VILLAGE.ordinal) villageWant?.let(wants::add)
+            if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
+                wants.add(bookVillageWant())
+                villageWant?.let(wants::add)
+                wants.addAll(extraVillageWants)
+            }
             if (tier.ordinal >= VillageTier.TOWN.ordinal) townWant?.let(wants::add)
             if (tier.ordinal >= VillageTier.CITY.ordinal) cityWant?.let(wants::add)
             return wants
         }
+    }
+
+    private fun bookVillageWant(): Commodity {
+        return Commodity(Items.BOOK, 1, baseValue = 4, minPrice = 2, maxPrice = 6, dailyTurnInLimit = BOOK_WANT_DAILY_LIMIT)
     }
 
     private fun enchantedBookCommodity(
@@ -1214,6 +1815,10 @@ object VillageEconomyService {
             "unbreaking" -> Enchantments.UNBREAKING
             "fortune" -> Enchantments.FORTUNE
             "power" -> Enchantments.POWER
+            "infinity" -> Enchantments.INFINITY
+            "respiration" -> Enchantments.RESPIRATION
+            "aqua_affinity" -> Enchantments.AQUA_AFFINITY
+            "feather_falling" -> Enchantments.FEATHER_FALLING
             "mending" -> Enchantments.MENDING
             "silk_touch" -> Enchantments.SILK_TOUCH
             else -> Enchantments.UNBREAKING
@@ -1228,6 +1833,10 @@ object VillageEconomyService {
             "unbreaking" -> 3
             "fortune" -> 2
             "power" -> 3
+            "infinity" -> 1
+            "respiration" -> 3
+            "aqua_affinity" -> 1
+            "feather_falling" -> 4
             "mending" -> 1
             "silk_touch" -> 1
             else -> 1

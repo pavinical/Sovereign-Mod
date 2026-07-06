@@ -4,10 +4,13 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking
 import net.minecraft.client.gui.DrawContext
 import net.minecraft.client.gui.screen.ingame.HandledScreen
 import net.minecraft.client.gui.widget.ButtonWidget
+import net.minecraft.client.sound.PositionedSoundInstance
 import net.minecraft.entity.player.PlayerInventory
 import net.minecraft.item.ItemStack
 import net.minecraft.item.Items
+import net.minecraft.sound.SoundEvents
 import net.minecraft.text.Text
+import org.lwjgl.glfw.GLFW
 import net.pavinical.sovereign.economy.VillageTradeMenu
 import net.pavinical.sovereign.economy.VillageTradeNetwork
 import net.pavinical.sovereign.economy.VillageTradeRefreshPayload
@@ -26,12 +29,19 @@ class VillageTradeScreen(
         SELL
     }
 
+    private enum class ActiveTab {
+        TRADE,
+        INFO
+    }
+
     private var selectedSellIndex = -1
     private var selectedBuyIndex = -1
     private var selectedSide: SelectedSide? = null
+    private var activeTab = ActiveTab.TRADE
     private var statusMessage: Text = Text.literal("")
     private var localTicksSinceSnapshot = 0L
     private var refreshRequested = false
+    private var tooltipsVisible = false
     private var sellScrollOffset = 0
     private var buyScrollOffset = 0
     private var draggingScroll: SelectedSide? = null
@@ -70,13 +80,8 @@ class VillageTradeScreen(
     override fun drawBackground(context: DrawContext, delta: Float, mouseX: Int, mouseY: Int) {
         context.fill(x, y, x + backgroundWidth, y + backgroundHeight, SCREEN_BG)
         drawRaisedBox(context, x, y, backgroundWidth, backgroundHeight)
+        drawTabs(context)
 
-        drawPanel(context, x + 4, y + 18, 96, 140, sellScrollOffset, maxSellScroll())
-        drawPanel(context, x + 275, y + 18, 96, 140, buyScrollOffset, maxBuyScroll())
-        drawInventoryGrid(context, x + 107, y + 90)
-
-        context.drawText(textRenderer, "Buy", x + 38, y + 6, TEXT_DARK, false)
-        context.drawText(textRenderer, "Sell", x + 313, y + 6, TEXT_DARK, false)
         context.drawCenteredTextWithShadow(
             textRenderer,
             trimToWidth("${handler.villageName} Trading Post", 150),
@@ -85,25 +90,61 @@ class VillageTradeScreen(
             TEXT_LIGHT
         )
         drawVillageXpBar(context, x + 128, y + 27, 120, 7)
+
+        if (activeTab == ActiveTab.TRADE) {
+            drawPanel(context, x + 4, y + 18, 96, 140, sellScrollOffset, maxSellScroll())
+            drawPanel(context, x + 275, y + 18, 96, 140, buyScrollOffset, maxBuyScroll())
+            drawInventoryGrid(context, x + 107, y + 90)
+            context.drawText(textRenderer, "Buy", x + 38, y + 6, TEXT_DARK, false)
+            context.drawText(textRenderer, "Sell", x + 313, y + 6, TEXT_DARK, false)
+        } else {
+            drawInfoTab(context)
+        }
     }
 
     override fun render(context: DrawContext, mouseX: Int, mouseY: Int, delta: Float) {
+        handler.updateInventorySlotVisibility(activeTab == ActiveTab.TRADE)
+        tradeButton.visible = activeTab == ActiveTab.TRADE
+        tradeAllButton.visible = activeTab == ActiveTab.TRADE
+        tradeButton.active = activeTab == ActiveTab.TRADE && selectedSide != null
+        tradeAllButton.active = activeTab == ActiveTab.TRADE && selectedSide != null
+
         super.render(context, mouseX, mouseY, delta)
 
-        drawOfferRows(context)
-        drawHoverInfo(context, mouseX, mouseY)
-
-        tradeButton.active = selectedSide != null
-        tradeAllButton.active = selectedSide != null
+        if (activeTab == ActiveTab.TRADE) {
+            drawOfferRows(context)
+            if (tooltipsVisible) {
+                drawHoverInfo(context, mouseX, mouseY)
+            }
+        } else {
+            drawInfoTab(context)
+        }
     }
 
     override fun handledScreenTick() {
         super.handledScreenTick()
+        if (!isClientSessionActive()) return
         localTicksSinceSnapshot++
         if (!refreshRequested && handler.snapshot.refreshTicks > 0L && localTicksSinceSnapshot >= handler.snapshot.refreshTicks) {
             refreshRequested = true
             requestSnapshotRefresh()
         }
+    }
+
+    override fun keyPressed(keyCode: Int, scanCode: Int, modifiers: Int): Boolean {
+        if (keyCode == GLFW.GLFW_KEY_TAB) {
+            tooltipsVisible = true
+            return true
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers)
+    }
+
+    override fun keyReleased(keyCode: Int, scanCode: Int, modifiers: Int): Boolean {
+        if (keyCode == GLFW.GLFW_KEY_TAB) {
+            tooltipsVisible = false
+            return true
+        }
+        return super.keyReleased(keyCode, scanCode, modifiers)
     }
 
     override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
@@ -114,13 +155,35 @@ class VillageTradeScreen(
         val clickedX = mouseX.toInt()
         val clickedY = mouseY.toInt()
 
+        if (hitTestPanel(clickedX, clickedY, x + 8, y - 18, 54, 18)) {
+            playButtonClick()
+            activeTab = ActiveTab.TRADE
+            return true
+        }
+
+        if (hitTestPanel(clickedX, clickedY, x + 64, y - 18, 54, 18)) {
+            playButtonClick()
+            activeTab = ActiveTab.INFO
+            selectedSide = null
+            selectedSellIndex = -1
+            selectedBuyIndex = -1
+            statusMessage = Text.literal("")
+            return true
+        }
+
+        if (activeTab != ActiveTab.TRADE) {
+            return super.mouseClicked(mouseX, mouseY, button)
+        }
+
         if (hitTestScrollGutter(clickedX, clickedY, x + 4, y + 18, 96, 140)) {
+            playButtonClick()
             draggingScroll = SelectedSide.BUY
             updateScrollFromMouse(SelectedSide.BUY, clickedY)
             return true
         }
 
         if (hitTestScrollGutter(clickedX, clickedY, x + 275, y + 18, 96, 140)) {
+            playButtonClick()
             draggingScroll = SelectedSide.SELL
             updateScrollFromMouse(SelectedSide.SELL, clickedY)
             return true
@@ -130,6 +193,7 @@ class VillageTradeScreen(
             ?.let { it + sellScrollOffset }
             ?.takeIf { it in sellOffers.indices }
         if (sellIndex != null) {
+            playButtonClick()
             selectedSellIndex = sellIndex
             selectedBuyIndex = -1
             selectedSide = SelectedSide.BUY
@@ -141,6 +205,7 @@ class VillageTradeScreen(
             ?.let { it + buyScrollOffset }
             ?.takeIf { it in buyOffers.indices }
         if (buyIndex != null) {
+            playButtonClick()
             selectedBuyIndex = buyIndex
             selectedSellIndex = -1
             selectedSide = SelectedSide.SELL
@@ -173,6 +238,10 @@ class VillageTradeScreen(
         val mouseYi = mouseY.toInt()
         val scrollDelta = if (verticalAmount > 0.0) -1 else 1
 
+        if (activeTab != ActiveTab.TRADE) {
+            return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)
+        }
+
         if (hitTestPanel(mouseXi, mouseYi, x + 4, y + 18, 96, 140)) {
             sellScrollOffset = (sellScrollOffset + scrollDelta).coerceIn(0, maxSellScroll())
             return true
@@ -196,12 +265,13 @@ class VillageTradeScreen(
             context.drawItem(offer.item, x + 9, rowY)
             context.drawText(
                 textRenderer,
-                offer.remainingToday.toString(),
+                offer.tradeItemCount.toString(),
                 x + 28,
                 rowY + 5,
                 TEXT_LIGHT,
                 false
             )
+            context.drawText(textRenderer, ">", x + 45, rowY + 5, TEXT_DARK, false)
             context.drawItem(emeraldStack, x + 59, rowY)
             context.drawText(
                 textRenderer,
@@ -221,12 +291,13 @@ class VillageTradeScreen(
             context.drawItem(offer.item, x + 280, rowY)
             context.drawText(
                 textRenderer,
-                buyOfferQuantityLabel(offer.grantsExperience, offer.remainingNeed),
+                offer.tradeItemCount.toString(),
                 x + 299,
                 rowY + 5,
                 TEXT_LIGHT,
                 false
             )
+            context.drawText(textRenderer, ">", x + 316, rowY + 5, TEXT_DARK, false)
             context.drawItem(emeraldStack, x + 330, rowY)
             context.drawText(
                 textRenderer,
@@ -259,11 +330,76 @@ class VillageTradeScreen(
         context.drawCenteredTextWithShadow(textRenderer, label, left + width / 2, top - 1, XP_TEXT)
     }
 
+    private fun drawTabs(context: DrawContext) {
+        drawTab(context, x + 8, y - 18, "Trade", activeTab == ActiveTab.TRADE)
+        drawTab(context, x + 64, y - 18, "Info", activeTab == ActiveTab.INFO)
+    }
+
+    private fun drawTab(context: DrawContext, left: Int, top: Int, label: String, selected: Boolean) {
+        val fill = if (selected) SCREEN_BG else PANEL_FILL
+        context.fill(left, top, left + 54, top + 18, fill)
+        context.fill(left, top, left + 54, top + 1, LIGHT_EDGE)
+        context.fill(left, top, left + 1, top + 18, LIGHT_EDGE)
+        context.fill(left + 53, top, left + 54, top + 18, DARK_EDGE)
+        if (!selected) context.fill(left, top + 17, left + 54, top + 18, DARK_EDGE)
+        context.drawCenteredTextWithShadow(textRenderer, label, left + 27, top + 5, if (selected) TEXT_LIGHT else TEXT_DARK)
+    }
+
+    private fun drawInfoTab(context: DrawContext) {
+        val info = handler.snapshot.info
+        val panelLeft = x + 24
+        val panelTop = y + 42
+        val panelWidth = backgroundWidth - 48
+        val panelHeight = 112
+        drawSunkenBox(context, panelLeft, panelTop, panelWidth, panelHeight)
+        context.fill(panelLeft + 2, panelTop + 2, panelLeft + panelWidth - 2, panelTop + panelHeight - 2, PANEL_FILL)
+
+        val leftX = panelLeft + 12
+        val rightX = panelLeft + 190
+        var leftY = panelTop + 10
+        drawInfoLine(context, "Tier: ${info.tierName}", leftX, leftY, TEXT_LIGHT, 168)
+        leftY += 12
+        drawInfoLine(context, "Pop: ${info.population} (${info.activeVillagers} active)", leftX, leftY, TEXT_LIGHT, 168)
+        leftY += 12
+        drawInfoLine(context, "Missing: ${info.missingVillagers}  Dead: ${info.deceasedVillagers}", leftX, leftY, TEXT_DARK, 168)
+        leftY += 12
+        drawInfoLine(context, "Slots: ${info.occupiedSlots}/${info.totalSlots}", leftX, leftY, TEXT_LIGHT, 168)
+        leftY += 12
+        val storageLabel = if (info.storageCapacity > 0 && info.storageUsed >= info.storageCapacity) {
+            "Storage: ${info.storageUsed}/${info.storageCapacity} Full"
+        } else {
+            "Storage: ${info.storageUsed}/${info.storageCapacity}"
+        }
+        drawInfoLine(context, storageLabel, leftX, leftY, if (info.storageCapacity > 0 && info.storageUsed >= info.storageCapacity) TOOLTIP_EMPTY else TEXT_LIGHT, 168)
+
+        var rightY = panelTop + 10
+        context.drawText(textRenderer, "Professions", rightX, rightY, TEXT_LIGHT, false)
+        rightY += 12
+        val professionLines = if (info.professionLines.isEmpty()) listOf("No workers scanned") else info.professionLines
+        professionLines.take(5).forEach { line ->
+            drawInfoLine(context, line, rightX, rightY, TEXT_DARK, 122)
+            rightY += 10
+        }
+
+        var slotY = panelTop + 76
+        context.drawText(textRenderer, "Slot Groups", rightX, slotY, TEXT_LIGHT, false)
+        slotY += 12
+        val slotLines = if (info.slotLines.isEmpty()) listOf("No slots registered") else info.slotLines
+        slotLines.take(2).forEach { line ->
+            drawInfoLine(context, line.replace(" filled", ""), rightX, slotY, TEXT_DARK, 122)
+            slotY += 10
+        }
+    }
+
+    private fun drawInfoLine(context: DrawContext, text: String, left: Int, top: Int, color: Int, maxWidth: Int) {
+        context.drawText(textRenderer, trimToWidth(text, maxWidth), left, top, color, false)
+    }
+
     private fun drawHoverInfo(context: DrawContext, mouseX: Int, mouseY: Int) {
         val lines = hoverInfoLines(mouseX, mouseY) ?: return
         val width = lines.maxOf { textRenderer.getWidth(it.text) } + 10
         val height = lines.size * 10 + 8
-        val left = (mouseX + 12).coerceAtMost(x + backgroundWidth - width - 4)
+        val left = tooltipLeft(mouseX, width)
         val top = (mouseY + 12).coerceAtMost(y + backgroundHeight - height - 4)
 
         val matrices = context.matrices
@@ -285,10 +421,12 @@ class VillageTradeScreen(
             val offer = sellOffers[sellIndex]
             return listOf(
                 TooltipLine("Village sells ${offer.displayName}", TOOLTIP_TITLE),
-                TooltipLine("Current Price: ${offer.emeraldCost} emerald each", TOOLTIP_PRICE),
+                TooltipLine("Current Price: ${tradeRatioText(offer.tradeItemCount, offer.emeraldCost)}", TOOLTIP_PRICE),
                 TooltipLine("Base Value: ${offer.baseValue}", TOOLTIP_DETAIL),
-                TooltipLine("Stock: ${offer.stockPercent}% (${offer.remainingToday}/${offer.maxDailyProduction})", stockColor(offer.remainingToday, offer.maxDailyProduction)),
+                TooltipLine("Village Stock: ${offer.remainingToday}/${offer.maxDailyProduction}", stockColor(offer.remainingToday, offer.maxDailyProduction)),
+                TooltipLine("Stock Level: ${offer.stockPercent}%", stockColor(offer.remainingToday, offer.maxDailyProduction)),
                 TooltipLine("${offer.stockLabel}: ${signed(offer.stockModifier)}", modifierColor(offer.stockModifier)),
+                TooltipLine("Profession Supply: -${supplyDiscountPercent(offer.producerCount)}%", TOOLTIP_NEGATIVE),
                 TooltipLine("Daily Market: ${signed(offer.dailyModifier)}", modifierColor(offer.dailyModifier)),
                 TooltipLine("Produced by ${offer.producerCount} ${offer.producerProfession}(s)", TOOLTIP_DETAIL),
                 TooltipLine("Restocks in ${formatRestockTime(handler.snapshot.produceRefreshTicks)}", TOOLTIP_TIMER)
@@ -300,30 +438,45 @@ class VillageTradeScreen(
             ?.takeIf { it in buyOffers.indices }
         if (buyIndex != null) {
             val offer = buyOffers[buyIndex]
-            val action = if (offer.grantsExperience) "Village wants" else "Village needs"
-            val payment = if (offer.grantsExperience) "Want Payment" else "Current Payment"
+            val action = if (offer.grantsExperience) "Village wants" else "Village buys"
+            val payment = if (offer.grantsExperience) "Request Payment" else "Current Payment"
             return listOf(
                 TooltipLine("$action ${offer.displayName}", TOOLTIP_TITLE),
-                TooltipLine("$payment: ${offer.emeraldReward} emerald each", TOOLTIP_PRICE),
+                TooltipLine("$payment: ${tradeRatioText(offer.tradeItemCount, offer.emeraldReward)}", TOOLTIP_PRICE),
                 TooltipLine("Base Value: ${offer.baseValue}", TOOLTIP_DETAIL),
                 if (offer.grantsExperience) {
-                    TooltipLine("Demand: unlimited", TOOLTIP_FULL)
+                    TooltipLine("Daily Turn-ins: ${offer.remainingNeed}/${offer.maxDailyNeed}", stockColor(offer.remainingNeed, offer.maxDailyNeed))
                 } else {
                     TooltipLine("Demand: ${offer.demandPercent}% (${offer.remainingNeed}/${offer.maxDailyNeed})", stockColor(offer.remainingNeed, offer.maxDailyNeed))
                 },
+                TooltipLine("${offer.demandLabel}: ${signed(offer.demandModifier)}", modifierColor(offer.demandModifier)),
+                TooltipLine("Profession Demand: +${demandBonusPercent(offer.requesterCount)}%", TOOLTIP_POSITIVE),
                 if (offer.grantsExperience) {
-                    TooltipLine("Want turn-ins do not run out", TOOLTIP_DETAIL)
+                    TooltipLine("Payment drops with repeated trades", TOOLTIP_DETAIL)
                 } else {
-                    TooltipLine("${offer.demandLabel}: ${signed(offer.demandModifier)}", modifierColor(offer.demandModifier))
+                    TooltipLine("", TOOLTIP_DETAIL)
                 },
                 TooltipLine("Daily Market: ${signed(offer.dailyModifier)}", modifierColor(offer.dailyModifier)),
                 if (offer.experienceReward > 0) TooltipLine("Village XP: +${offer.experienceReward} each", TOOLTIP_PRICE) else TooltipLine("", TOOLTIP_DETAIL),
-                TooltipLine("Requested by ${offer.requesterCount} ${offer.requesterProfession}(s)", TOOLTIP_DETAIL),
+                TooltipLine("Needed by: ${offer.requesterProfession}", TOOLTIP_DETAIL),
                 TooltipLine("Refreshes in ${formatRestockTime(handler.snapshot.needRefreshTicks)}", TOOLTIP_TIMER)
             ).filter { it.text.isNotBlank() }
         }
 
         return null
+    }
+
+    private fun tooltipLeft(mouseX: Int, width: Int): Int {
+        val leftPanelRight = x + 100
+        val rightPanelLeft = x + 275
+        return when {
+            mouseX <= leftPanelRight -> (x + 108).coerceAtMost(x + backgroundWidth - width - 4)
+            mouseX >= rightPanelLeft -> (x + 104).coerceAtMost(x + backgroundWidth - width - 4)
+            else -> {
+                val right = mouseX + 12
+                if (right + width <= x + backgroundWidth - 4) right else mouseX - width - 12
+            }
+        }.coerceAtLeast(x + 4)
     }
 
     private fun stockColor(remaining: Int, total: Int): Int {
@@ -344,6 +497,16 @@ class VillageTradeScreen(
         }
     }
 
+    private fun supplyDiscountPercent(professionCount: Int): Int {
+        return ((professionCount.coerceIn(1, PROFESSION_PRICE_EFFECTIVE_COUNT_CAP) - 1) * PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_PER_EXTRA)
+            .coerceAtMost(PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_MAX)
+    }
+
+    private fun demandBonusPercent(professionCount: Int): Int {
+        return ((professionCount.coerceIn(1, PROFESSION_PRICE_EFFECTIVE_COUNT_CAP) - 1) * PROFESSION_DEMAND_PRICE_BONUS_PERCENT_PER_EXTRA)
+            .coerceAtMost(PROFESSION_DEMAND_PRICE_BONUS_PERCENT_MAX)
+    }
+
     private fun formatRestockTime(snapshotTicks: Long): String {
         val remainingTicks = (snapshotTicks - localTicksSinceSnapshot).coerceAtLeast(0L)
         val totalSeconds = (remainingTicks / 20L).coerceAtLeast(0L)
@@ -352,8 +515,12 @@ class VillageTradeScreen(
         return if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
     }
 
-    private fun buyOfferQuantityLabel(grantsExperience: Boolean, quantity: Int): String {
-        return if (grantsExperience) "Any" else quantity.toString()
+    private fun tradeRatioText(itemCount: Int, emeralds: Int): String {
+        return if (itemCount <= 1) {
+            "$emeralds emerald per item"
+        } else {
+            "$itemCount items for $emeralds emerald"
+        }
     }
 
     private fun drawInventoryGrid(context: DrawContext, gridX: Int, gridY: Int) {
@@ -548,6 +715,7 @@ class VillageTradeScreen(
     }
 
     private fun sendTradeRequest(direction: Int, professionId: String, quantity: Int) {
+        if (!isClientSessionActive()) return
         ClientPlayNetworking.send(
             VillageTradeRequestPayload(
                 clerkX = handler.clerkX,
@@ -561,6 +729,7 @@ class VillageTradeScreen(
     }
 
     private fun requestSnapshotRefresh() {
+        if (!isClientSessionActive()) return
         ClientPlayNetworking.send(
             VillageTradeRefreshPayload(
                 clerkX = handler.clerkX,
@@ -568,6 +737,16 @@ class VillageTradeScreen(
                 clerkZ = handler.clerkZ
             )
         )
+    }
+
+    private fun playButtonClick() {
+        if (!isClientSessionActive()) return
+        client?.soundManager?.play(PositionedSoundInstance.master(SoundEvents.UI_BUTTON_CLICK, 1.0f))
+    }
+
+    private fun isClientSessionActive(): Boolean {
+        val currentClient = client ?: return false
+        return currentClient.world != null && currentClient.networkHandler != null
     }
 
     fun applyServerSnapshot(payload: VillageTradeSyncPayload) {
@@ -622,6 +801,11 @@ class VillageTradeScreen(
         private const val TOOLTIP_NEGATIVE = 0xFFFF7777.toInt()
         private const val TOOLTIP_NEUTRAL = 0xFFE6E6E6.toInt()
         private const val TOOLTIP_Z = 600.0f
+        private const val PROFESSION_PRICE_EFFECTIVE_COUNT_CAP = 6
+        private const val PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_PER_EXTRA = 5
+        private const val PROFESSION_SUPPLY_PRICE_DISCOUNT_PERCENT_MAX = 25
+        private const val PROFESSION_DEMAND_PRICE_BONUS_PERCENT_PER_EXTRA = 8
+        private const val PROFESSION_DEMAND_PRICE_BONUS_PERCENT_MAX = 40
     }
 }
 

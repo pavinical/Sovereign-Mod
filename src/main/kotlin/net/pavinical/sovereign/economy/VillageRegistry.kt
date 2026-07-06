@@ -55,6 +55,7 @@ class VillageRegistry : PersistentState() {
             tag.putString("name", village.name)
             tag.putString("biome", village.biome)
             village.founderId?.let { tag.putString("founderId", it.toString()) }
+            tag.putString("specializationProfessionId", village.specializationProfessionId)
             tag.putString("tier", village.tier.name)
             tag.putInt("experience", village.experience)
             tag.putInt("clerkX", village.clerkPos.x)
@@ -82,6 +83,8 @@ class VillageRegistry : PersistentState() {
             tag.put("buyDemandTotal", serializeResourceMap(village.buyDemandTotal))
             tag.put("buyDemandFulfilled", serializeResourceMap(village.buyDemandFulfilled))
             tag.put("sellStockRemainingByProfession", serializeProfessionMap(village.sellStockRemainingByProfession))
+            tag.put("artisanRefillTickByProfession", serializeLongMap(village.artisanRefillTickByProfession))
+            tag.put("artisanRefillCountByProfession", serializeProfessionMap(village.artisanRefillCountByProfession))
             tag.put("buyDemandTotalByProfession", serializeProfessionMap(village.buyDemandTotalByProfession))
             tag.put("buyDemandFulfilledByProfession", serializeProfessionMap(village.buyDemandFulfilledByProfession))
             tag.put("wantDemandTotalByProfession", serializeProfessionMap(village.wantDemandTotalByProfession))
@@ -138,6 +141,8 @@ class VillageRegistry : PersistentState() {
                 val buyDemandTotal = deserializeResourceMap(tag.getCompound("buyDemandTotal"))
                 val buyDemandFulfilled = deserializeResourceMap(tag.getCompound("buyDemandFulfilled"))
                 val sellStockRemainingByProfession = deserializeProfessionMap(tag.getCompound("sellStockRemainingByProfession"))
+                val artisanRefillTickByProfession = deserializeLongMap(tag.getCompound("artisanRefillTickByProfession"))
+                val artisanRefillCountByProfession = deserializeProfessionMap(tag.getCompound("artisanRefillCountByProfession"))
                 val buyDemandTotalByProfession = deserializeProfessionMap(tag.getCompound("buyDemandTotalByProfession"))
                 val buyDemandFulfilledByProfession = deserializeProfessionMap(tag.getCompound("buyDemandFulfilledByProfession"))
                 val wantDemandTotalByProfession = deserializeProfessionMap(tag.getCompound("wantDemandTotalByProfession"))
@@ -153,6 +158,7 @@ class VillageRegistry : PersistentState() {
                     biome = biome,
                     clerkPos = clerkPos,
                     founderId = founderId,
+                    specializationProfessionId = tag.getString("specializationProfessionId"),
                     tier = readTierFromTag(tag),
                     experience = tag.getInt("experience"),
                     resources = resources,
@@ -170,6 +176,8 @@ class VillageRegistry : PersistentState() {
                     buyDemandTotal = buyDemandTotal,
                     buyDemandFulfilled = buyDemandFulfilled,
                     sellStockRemainingByProfession = sellStockRemainingByProfession,
+                    artisanRefillTickByProfession = artisanRefillTickByProfession,
+                    artisanRefillCountByProfession = artisanRefillCountByProfession,
                     buyDemandTotalByProfession = buyDemandTotalByProfession,
                     buyDemandFulfilledByProfession = buyDemandFulfilledByProfession,
                     wantDemandTotalByProfession = wantDemandTotalByProfession,
@@ -207,10 +215,26 @@ class VillageRegistry : PersistentState() {
             return tag
         }
 
+        private fun serializeLongMap(map: Map<String, Long>): NbtCompound {
+            val tag = NbtCompound()
+            for ((profession, tick) in map) {
+                tag.putLong(profession, tick)
+            }
+            return tag
+        }
+
         private fun deserializeProfessionMap(tag: NbtCompound): MutableMap<String, Int> {
             val values = mutableMapOf<String, Int>()
             for (entry in tag.keys) {
                 values[entry] = tag.getInt(entry)
+            }
+            return values
+        }
+
+        private fun deserializeLongMap(tag: NbtCompound): MutableMap<String, Long> {
+            val values = mutableMapOf<String, Long>()
+            for (entry in tag.keys) {
+                values[entry] = tag.getLong(entry)
             }
             return values
         }

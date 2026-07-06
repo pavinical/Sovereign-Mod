@@ -34,6 +34,7 @@ private const val WEAPONSMITH_ID = "minecraft:weaponsmith"
 private const val CLERIC_ID = "minecraft:cleric"
 private const val LIBRARIAN_ID = "minecraft:librarian"
 private const val LEATHERWORKER_ID = "minecraft:leatherworker"
+private const val CARTOGRAPHER_ID = "minecraft:cartographer"
 private const val NITWIT_ID = "minecraft:nitwit"
 
 private val PEASANT_PROFESSION_IDS = listOf(
@@ -42,7 +43,17 @@ private val PEASANT_PROFESSION_IDS = listOf(
     MASON_ID,
     FLETCHER_ID,
     BUTCHER_ID,
-    FISHERMAN_ID
+    FISHERMAN_ID,
+    LEATHERWORKER_ID
+)
+
+private val ARTISAN_PROFESSION_IDS = listOf(
+    ARMORER_ID,
+    TOOLSMITH_ID,
+    WEAPONSMITH_ID,
+    CLERIC_ID,
+    LIBRARIAN_ID,
+    CARTOGRAPHER_ID
 )
 
 enum class VillagerState {
@@ -54,13 +65,14 @@ enum class VillagerState {
 enum class HamletBiomeArchetype(
     val biomeAliases: Set<String>,
     val staticPeasantProfessionId: String,
-    val artisanProfessionId: String
+    val artisanProfessionId: String,
+    val excludedRandomProfessionIds: Set<String> = emptySet()
 ) {
-    PLAINS(setOf("plains"), FARMER_ID, LIBRARIAN_ID),
-    DESERT(setOf("desert"), MASON_ID, CLERIC_ID),
-    TAIGA(setOf("taiga"), FLETCHER_ID, TOOLSMITH_ID),
-    SAVANNAH(setOf("savanna", "savannah"), SHEPHERD_ID, WEAPONSMITH_ID),
-    SNOWY(setOf("snowy", "cold", "ice", "frozen"), FISHERMAN_ID, ARMORER_ID);
+    PLAINS(setOf("plains"), FARMER_ID, LIBRARIAN_ID, setOf(FLETCHER_ID)),
+    DESERT(setOf("desert"), MASON_ID, CLERIC_ID, setOf(BUTCHER_ID)),
+    TAIGA(setOf("taiga"), FLETCHER_ID, TOOLSMITH_ID, setOf(FISHERMAN_ID)),
+    SAVANNAH(setOf("savanna", "savannah"), SHEPHERD_ID, WEAPONSMITH_ID, setOf(FARMER_ID)),
+    SNOWY(setOf("snowy", "cold", "ice", "frozen"), FISHERMAN_ID, ARMORER_ID, setOf(SHEPHERD_ID));
 
     fun requiredProfessions(tier: VillageTier, villageId: UUID?): List<VillagerProfession> =
         expandedSlotProfessionIds(tier, villageId).mapNotNull { professionById(it, null) }
@@ -81,9 +93,11 @@ enum class HamletBiomeArchetype(
         }
         if (tier == VillageTier.TOWN || tier == VillageTier.CITY) {
             slots.add(artisanProfessionId)
+            slots.add(randomArtisanProfessionId(villageId))
         }
         if (tier == VillageTier.CITY) {
             slots.add(artisanProfessionId)
+            slots.add(randomArtisanProfessionId(villageId, offset = 1))
         }
         return slots
     }
@@ -104,10 +118,18 @@ enum class HamletBiomeArchetype(
     }
 
     private fun selectedPeasantProfessionIds(villageId: UUID?): List<String> {
-        val randomCandidates = PEASANT_PROFESSION_IDS.filter { it != staticPeasantProfessionId }
+        val randomCandidates = PEASANT_PROFESSION_IDS.filter { professionId ->
+            professionId != staticPeasantProfessionId && professionId !in excludedRandomProfessionIds
+        }
         val seed = "${villageId ?: "unregistered"}:${name}:random-peasant".hashCode()
         val randomProfessionId = randomCandidates[Math.floorMod(seed, randomCandidates.size)]
         return listOf(staticPeasantProfessionId, randomProfessionId)
+    }
+
+    private fun randomArtisanProfessionId(villageId: UUID?, offset: Int = 0): String {
+        val candidates = ARTISAN_PROFESSION_IDS.filter { it != artisanProfessionId }
+        val seed = "${villageId ?: "unregistered"}:${name}:random-artisan:$offset".hashCode()
+        return candidates[Math.floorMod(seed, candidates.size)]
     }
 }
 
@@ -316,34 +338,23 @@ class ClerkTableBlockEntity(pos: BlockPos, state: BlockState) : BlockEntity(ModB
         tier: VillageTier,
         owningVillageId: UUID?
     ): List<HamletSlot> {
-        val candidates = allRecords
+        val includeArtisans = tier.ordinal >= VillageTier.VILLAGE.ordinal
+        return allRecords
             .asSequence()
             .filter { it.state != VillagerState.DECEASED }
+            .filter { record ->
+                val professionId = professionToId(record.profession)
+                professionId != NITWIT_ID && (includeArtisans || professionId !in ARTISAN_PROFESSION_IDS)
+            }
             .sortedBy { it.lastSeenTick }
-            .toMutableList()
-
-        val requiredSlots = archetype.requiredProfessions(tier, owningVillageId).map { profession ->
-            HamletSlot(
-                requiredProfession = profession,
-                occupied = false,
-                villagerUUID = null
-            )
-        }.toMutableList()
-
-        for (index in requiredSlots.indices) {
-            val requiredProfession = requiredSlots[index].requiredProfession
-            val matchIndex = candidates.indexOfFirst { it.profession == requiredProfession }
-            if (matchIndex < 0) continue
-
-            val matched = candidates.removeAt(matchIndex)
-            requiredSlots[index] = HamletSlot(
-                requiredProfession = requiredProfession,
-                occupied = true,
-                villagerUUID = matched.uuid
-            )
-        }
-
-        return requiredSlots.toList()
+            .map { record ->
+                HamletSlot(
+                    requiredProfession = record.profession,
+                    occupied = true,
+                    villagerUUID = record.uuid
+                )
+            }
+            .toList()
     }
 
     private fun resolveHamletArchetype(biomeKey: String): HamletBiomeArchetype {
@@ -440,6 +451,8 @@ class ClerkTableBlockEntity(pos: BlockPos, state: BlockState) : BlockEntity(ModB
         WEAPONSMITH_ID,
         CLERIC_ID,
         LIBRARIAN_ID,
+        LEATHERWORKER_ID,
+        CARTOGRAPHER_ID,
         NITWIT_ID
     )
 
@@ -464,6 +477,8 @@ fun professionDisplayName(profession: VillagerProfession): String = when (profes
     WEAPONSMITH_ID -> "Weaponsmith"
     CLERIC_ID -> "Cleric"
     LIBRARIAN_ID -> "Librarian"
+    LEATHERWORKER_ID -> "Leatherworker"
+    CARTOGRAPHER_ID -> "Cartographer"
     NITWIT_ID -> "Nitwit"
     else -> "Other"
 }
@@ -472,13 +487,12 @@ private fun professionToId(profession: VillagerProfession): String =
     Registries.VILLAGER_PROFESSION.getId(profession).toString()
 
 private fun normalizeProfessionForCensus(profession: VillagerProfession): VillagerProfession {
-    if (professionToId(profession) != LEATHERWORKER_ID) return profession
-    return professionById(BUTCHER_ID, profession) ?: profession
+    return profession
 }
 
 private fun professionById(rawId: String, fallback: VillagerProfession?): VillagerProfession? {
     val professionId = Identifier.tryParse(rawId) ?: return fallback
-    return Registries.VILLAGER_PROFESSION.get(professionId) ?: fallback
+    return Registries.VILLAGER_PROFESSION.get(professionId)
 }
 
 private fun professionById(rawId: String): VillagerProfession? = professionById(rawId, null)

@@ -12,6 +12,7 @@ data class VillageData(
     val biome: String,
     val clerkPos: BlockPos,
     val founderId: UUID? = null,
+    var specializationProfessionId: String = "",
     var tier: VillageTier = VillageTier.HAMLET,
     var experience: Int = 0,
     val resources: MutableMap<ResourceType, Int> = ResourceType.entries
@@ -29,6 +30,8 @@ data class VillageData(
     val deficitResources: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
     val sellStockRemaining: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
     val sellStockRemainingByProfession: MutableMap<String, Int> = mutableMapOf(),
+    val artisanRefillTickByProfession: MutableMap<String, Long> = mutableMapOf(),
+    val artisanRefillCountByProfession: MutableMap<String, Int> = mutableMapOf(),
     val buyDemandTotal: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
     val buyDemandFulfilled: MutableMap<ResourceType, Int> = ResourceType.entries.associateWith { 0 }.toMutableMap(),
     val buyDemandTotalByProfession: MutableMap<String, Int> = mutableMapOf(),

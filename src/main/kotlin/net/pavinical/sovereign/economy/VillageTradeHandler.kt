@@ -31,6 +31,7 @@ import java.util.UUID
 
 object VillageTradeHandler {
     val TYPE_ID: Identifier = Identifier.of(Sovereign.MOD_ID, "village_trade")
+    private val activeTables: MutableMap<BlockPos, UUID> = mutableMapOf()
 
     val TYPE: ExtendedScreenHandlerType<VillageTradeMenu, VillageTradeOpenData> = Registry.register(
         Registries.SCREEN_HANDLER,
@@ -165,6 +166,10 @@ object VillageTradeHandler {
         )
         registry.addVillage(village)
         (world.getBlockEntity(clerkPos) as? ClerkTableBlockEntity)?.markVillage(village.id)
+        ClerkCensusService.forceSyncVillage(world, village)?.let { snapshot ->
+            ClerkEconomyService.refreshVillageFromSnapshot(world, village, snapshot)
+            registry.markDirty()
+        }
         NamingSession.clear(player.uuid)
 
         VillageBorderTracker.suppressEnteringHeader(player.uuid)
@@ -192,6 +197,11 @@ object VillageTradeHandler {
             ?: registry.getVillageAtPos(clerkPos)
             ?: return false
         val primaryClerkPos = village.clerkPos
+        val activePlayerId = activeTables[primaryClerkPos]
+        if (activePlayerId != null && activePlayerId != player.uuid) {
+            player.sendMessage(Text.literal("Another player is already using this trading post.").formatted(Formatting.RED), false)
+            return true
+        }
         val snapshot = VillageEconomyService.openSnapshot(world, clerkPos)
             ?: VillageEconomyService.emptySnapshotForRegisteredVillage(world, clerkPos)
             ?: return false
@@ -203,11 +213,18 @@ object VillageTradeHandler {
             snapshot = snapshot.toNetworkData()
         )
 
+        activeTables[primaryClerkPos] = player.uuid
         player.openHandledScreen(
             createFactoryFor(openData)
         )
 
         return true
+    }
+
+    fun closeFor(player: PlayerEntity, clerkPos: BlockPos) {
+        if (activeTables[clerkPos] == player.uuid) {
+            activeTables.remove(clerkPos)
+        }
     }
 
     fun createFactoryFor(payload: VillageTradeOpenData): NamedScreenHandlerFactory {

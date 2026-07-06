@@ -17,7 +17,8 @@ data class VillageMarketSnapshot(
     val tierName: String,
     val villageExperience: Int,
     val currentTierMinExperience: Int,
-    val nextTierExperience: Int
+    val nextTierExperience: Int,
+    val info: VillageInfoData
 ) {
     fun toNetworkData(): VillageMarketSnapshotData = VillageMarketSnapshotData(
         refreshTicks = refreshTicks,
@@ -28,15 +29,85 @@ data class VillageMarketSnapshot(
         villageExperience = villageExperience,
         currentTierMinExperience = currentTierMinExperience,
         nextTierExperience = nextTierExperience,
+        info = info,
         sellOffers = sellOffers.map { it.toNetworkOffer() },
         buyOffers = buyOffers.map { it.toNetworkOffer() }
     )
+}
+
+data class VillageInfoData(
+    val tierName: String,
+    val population: Int,
+    val activeVillagers: Int,
+    val missingVillagers: Int,
+    val deceasedVillagers: Int,
+    val occupiedSlots: Int,
+    val totalSlots: Int,
+    val storageUsed: Int,
+    val storageCapacity: Int,
+    val professionLines: List<String>,
+    val slotLines: List<String>
+) {
+    companion object {
+        val EMPTY = VillageInfoData(
+            tierName = "Hamlet",
+            population = 0,
+            activeVillagers = 0,
+            missingVillagers = 0,
+            deceasedVillagers = 0,
+            occupiedSlots = 0,
+            totalSlots = 0,
+            storageUsed = 0,
+            storageCapacity = 0,
+            professionLines = emptyList(),
+            slotLines = emptyList()
+        )
+
+        fun write(buf: RegistryByteBuf, info: VillageInfoData) {
+            buf.writeString(info.tierName)
+            buf.writeInt(info.population)
+            buf.writeInt(info.activeVillagers)
+            buf.writeInt(info.missingVillagers)
+            buf.writeInt(info.deceasedVillagers)
+            buf.writeInt(info.occupiedSlots)
+            buf.writeInt(info.totalSlots)
+            buf.writeInt(info.storageUsed)
+            buf.writeInt(info.storageCapacity)
+            writeStringList(buf, info.professionLines)
+            writeStringList(buf, info.slotLines)
+        }
+
+        fun read(buf: RegistryByteBuf): VillageInfoData = VillageInfoData(
+            tierName = buf.readString(),
+            population = buf.readInt(),
+            activeVillagers = buf.readInt(),
+            missingVillagers = buf.readInt(),
+            deceasedVillagers = buf.readInt(),
+            occupiedSlots = buf.readInt(),
+            totalSlots = buf.readInt(),
+            storageUsed = buf.readInt(),
+            storageCapacity = buf.readInt(),
+            professionLines = readStringList(buf),
+            slotLines = readStringList(buf)
+        )
+
+        private fun writeStringList(buf: RegistryByteBuf, values: List<String>) {
+            buf.writeInt(values.size)
+            values.forEach(buf::writeString)
+        }
+
+        private fun readStringList(buf: RegistryByteBuf): List<String> {
+            val size = buf.readInt()
+            return List(size) { buf.readString() }
+        }
+    }
 }
 
 data class VillageTradeOfferData(
     val itemId: String,
     val displayName: String,
     val emeraldValue: Int,
+    val tradeItemCount: Int,
     val totalDaily: Int,
     val remaining: Int,
     val maxDaily: Int,
@@ -57,6 +128,7 @@ data class VillageTradeOfferData(
         item = itemFromId(itemId),
         displayName = displayName,
         emeraldCost = emeraldValue,
+        tradeItemCount = tradeItemCount,
         producedToday = totalDaily,
         remainingToday = remaining,
         maxDailyProduction = maxDaily,
@@ -76,6 +148,7 @@ data class VillageTradeOfferData(
         item = itemFromId(itemId),
         displayName = displayName,
         emeraldReward = emeraldValue,
+        tradeItemCount = tradeItemCount,
         neededToday = totalDaily,
         remainingNeed = remaining,
         maxDailyNeed = maxDaily,
@@ -98,6 +171,7 @@ data class VillageTradeOfferData(
             itemId = itemIdOf(offer.item),
             displayName = offer.displayName,
             emeraldValue = offer.emeraldCost,
+            tradeItemCount = offer.tradeItemCount,
             totalDaily = offer.producedToday,
             remaining = offer.remainingToday,
             maxDaily = offer.maxDailyProduction,
@@ -119,6 +193,7 @@ data class VillageTradeOfferData(
             itemId = itemIdOf(offer.item),
             displayName = offer.displayName,
             emeraldValue = offer.emeraldReward,
+            tradeItemCount = offer.tradeItemCount,
             totalDaily = offer.neededToday,
             remaining = offer.remainingNeed,
             maxDaily = offer.maxDailyNeed,
@@ -147,6 +222,7 @@ data class VillageMarketSnapshotData(
     val villageExperience: Int,
     val currentTierMinExperience: Int,
     val nextTierExperience: Int,
+    val info: VillageInfoData,
     val sellOffers: List<VillageTradeOfferData>,
     val buyOffers: List<VillageTradeOfferData>
 ) {
@@ -159,6 +235,7 @@ data class VillageMarketSnapshotData(
         villageExperience = villageExperience,
         currentTierMinExperience = currentTierMinExperience,
         nextTierExperience = nextTierExperience,
+        info = info,
         sellOffers = sellOffers.map { it.toSellOffer() },
         buyOffers = buyOffers.map { it.toBuyOffer() }
     )
@@ -174,6 +251,7 @@ data class VillageMarketSnapshotData(
                 buf.writeInt(value.villageExperience)
                 buf.writeInt(value.currentTierMinExperience)
                 buf.writeInt(value.nextTierExperience)
+                VillageInfoData.write(buf, value.info)
                 writeOfferList(buf, value.sellOffers)
                 writeOfferList(buf, value.buyOffers)
             },
@@ -187,6 +265,7 @@ data class VillageMarketSnapshotData(
                     villageExperience = buf.readInt(),
                     currentTierMinExperience = buf.readInt(),
                     nextTierExperience = buf.readInt(),
+                    info = VillageInfoData.read(buf),
                     sellOffers = readOfferList(buf),
                     buyOffers = readOfferList(buf)
                 )
@@ -199,6 +278,7 @@ data class VillageMarketSnapshotData(
                 buf.writeString(offer.itemId)
                 buf.writeString(offer.displayName)
                 buf.writeInt(offer.emeraldValue)
+                buf.writeInt(offer.tradeItemCount)
                 buf.writeInt(offer.totalDaily)
                 buf.writeInt(offer.remaining)
                 buf.writeInt(offer.maxDaily)
@@ -226,6 +306,7 @@ data class VillageMarketSnapshotData(
                         itemId = buf.readString(),
                         displayName = buf.readString(),
                         emeraldValue = buf.readInt(),
+                        tradeItemCount = buf.readInt(),
                         totalDaily = buf.readInt(),
                         remaining = buf.readInt(),
                         maxDaily = buf.readInt(),
@@ -253,6 +334,7 @@ data class SellOffer(
     val item: ItemStack,
     val displayName: String,
     val emeraldCost: Int,
+    val tradeItemCount: Int,
     val producedToday: Int,
     val remainingToday: Int,
     val maxDailyProduction: Int,
@@ -274,6 +356,7 @@ data class BuyOffer(
     val item: ItemStack,
     val displayName: String,
     val emeraldReward: Int,
+    val tradeItemCount: Int,
     val neededToday: Int,
     val remainingNeed: Int,
     val maxDailyNeed: Int,
