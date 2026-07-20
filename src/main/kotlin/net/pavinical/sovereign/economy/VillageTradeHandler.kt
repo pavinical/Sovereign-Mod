@@ -6,6 +6,8 @@ import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerFactory
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType
 import net.minecraft.entity.player.PlayerEntity
 import net.minecraft.entity.player.PlayerInventory
+import net.minecraft.item.ItemStack
+import net.minecraft.item.Items
 import net.minecraft.registry.Registries
 import net.minecraft.registry.Registry
 import net.minecraft.screen.NamedScreenHandlerFactory
@@ -20,6 +22,7 @@ import net.pavinical.sovereign.block.ClerkTableBlock
 import net.pavinical.sovereign.block.ClerkTableBlockEntity
 import net.pavinical.sovereign.data.VillageData
 import net.pavinical.sovereign.economy.VillageTradePacket.VILLAGE_FOUNDED_ID
+import net.pavinical.sovereign.economy.VillageTradePacket.LEDGER_TRANSFER_ID
 import net.pavinical.sovereign.economy.VillageTradePacket.VILLAGE_NAME_OPEN_ID
 import net.pavinical.sovereign.economy.VillageTradePacket.VILLAGE_NAME_SUBMIT_ID
 import net.pavinical.sovereign.economy.VillageTradePacket.TRADE_REFRESH_ID
@@ -48,6 +51,7 @@ object VillageTradeHandler {
         PayloadTypeRegistry.playC2S().register(TRADE_REQUEST_ID, VillageTradeRequestPayload.PACKET_CODEC)
         PayloadTypeRegistry.playS2C().register(TRADE_SYNC_ID, VillageTradeSyncPayload.PACKET_CODEC)
         PayloadTypeRegistry.playC2S().register(TRADE_REFRESH_ID, VillageTradeRefreshPayload.PACKET_CODEC)
+        PayloadTypeRegistry.playC2S().register(LEDGER_TRANSFER_ID, VillageLedgerTransferPayload.PACKET_CODEC)
         PayloadTypeRegistry.playS2C().register(VILLAGE_NAME_OPEN_ID, VillageNameOpenPayload.PACKET_CODEC)
         PayloadTypeRegistry.playC2S().register(VILLAGE_NAME_SUBMIT_ID, VillageNameSubmitPayload.PACKET_CODEC)
         PayloadTypeRegistry.playS2C().register(VILLAGE_FOUNDED_ID, VillageFoundedPayload.PACKET_CODEC)
@@ -55,6 +59,16 @@ object VillageTradeHandler {
         ServerPlayNetworking.registerGlobalReceiver(TRADE_REQUEST_ID) { payload, context ->
             val player = context.player()
             val world = context.server().overworld
+            val menu = player.currentScreenHandler as? VillageTradeMenu
+            val commissionInputStack = if (
+                payload.direction == VillageTradeNetwork.TRADE_DIRECTION_COMMISSION_ORDER &&
+                menu != null &&
+                menu.clerkPos == payload.position()
+            ) {
+                menu.commissionInputStack()
+            } else {
+                null
+            }
 
             val result = VillageEconomyService.executeTrade(
                 world = world,
@@ -62,14 +76,15 @@ object VillageTradeHandler {
                 clerkPos = payload.position(),
                 direction = payload.direction,
                 professionId = payload.professionId,
-                requestedQuantity = payload.quantity
+                requestedQuantity = payload.quantity,
+                commissionInputStack = commissionInputStack
             )
 
             if (!result.accepted && !result.message.string.isBlank()) {
                 player.sendMessage(result.message, false)
             }
 
-            val snapshot = result.snapshot ?: VillageEconomyService.openSnapshot(world, payload.position())
+            val snapshot = result.snapshot ?: VillageEconomyService.openSnapshot(world, payload.position(), player)
             if (snapshot != null) {
                 val syncPayload = VillageTradeSyncPayload(
                     clerkX = payload.clerkX,
@@ -84,12 +99,13 @@ object VillageTradeHandler {
 
         ServerPlayNetworking.registerGlobalReceiver(TRADE_REFRESH_ID) { payload, context ->
             val world = context.server().overworld
-            val snapshot = VillageEconomyService.openSnapshot(world, payload.position())
-                ?: VillageEconomyService.emptySnapshotForRegisteredVillage(world, payload.position())
+            val player = context.player()
+            val snapshot = VillageEconomyService.openSnapshot(world, payload.position(), player)
+                ?: VillageEconomyService.emptySnapshotForRegisteredVillage(world, payload.position(), player)
                 ?: return@registerGlobalReceiver
 
             ServerPlayNetworking.send(
-                context.player(),
+                player,
                 VillageTradeSyncPayload(
                     clerkX = payload.clerkX,
                     clerkY = payload.clerkY,
@@ -100,18 +116,39 @@ object VillageTradeHandler {
             )
         }
 
+        ServerPlayNetworking.registerGlobalReceiver(LEDGER_TRANSFER_ID) { payload, context ->
+            val player = context.player()
+            val world = context.server().overworld
+            val message = handleLedgerTransfer(world, player, payload)
+            val snapshot = VillageEconomyService.openSnapshot(world, payload.position(), player)
+                ?: VillageEconomyService.emptySnapshotForRegisteredVillage(world, payload.position(), player)
+                ?: return@registerGlobalReceiver
+
+            ServerPlayNetworking.send(
+                player,
+                VillageTradeSyncPayload(
+                    clerkX = payload.clerkX,
+                    clerkY = payload.clerkY,
+                    clerkZ = payload.clerkZ,
+                    message = message,
+                    snapshot = snapshot.toNetworkData()
+                )
+            )
+        }
+
         ServerPlayNetworking.registerGlobalReceiver(VILLAGE_NAME_SUBMIT_ID) { payload, context ->
             handleVillageNameSubmit(payload, context.player(), context.server().overworld)
         }
     }
 
-    fun openNamingScreen(player: ServerPlayerEntity, clerkPos: BlockPos) {
+    fun openNamingScreen(player: ServerPlayerEntity, clerkPos: BlockPos, biome: String) {
         ServerPlayNetworking.send(
             player,
             VillageNameOpenPayload(
                 clerkX = clerkPos.x,
                 clerkY = clerkPos.y,
-                clerkZ = clerkPos.z
+                clerkZ = clerkPos.z,
+                biome = biome
             )
         )
     }
@@ -134,12 +171,12 @@ object VillageTradeHandler {
 
         if (villageName.isBlank()) {
             player.sendMessage(Text.literal("Village name cannot be blank.").formatted(Formatting.RED), false)
-            return openNamingScreen(player, clerkPos)
+            return openNamingScreen(player, clerkPos, session.biome)
         }
 
         if (registry.isVillageNameTaken(villageName)) {
             player.sendMessage(Text.literal("A village with that name already exists.").formatted(Formatting.RED), false)
-            return openNamingScreen(player, clerkPos)
+            return openNamingScreen(player, clerkPos, session.biome)
         }
 
         val sharedVillage = registry.getVillageWithinRadius(clerkPos, ClerkTableBlock.VILLAGE_SCAN_RADIUS_BLOCKS)
@@ -162,6 +199,7 @@ object VillageTradeHandler {
             name = villageName,
             biome = session.biome,
             clerkPos = clerkPos,
+            centerPos = VillageCenterService.nearestBell(world, clerkPos) ?: clerkPos,
             founderId = player.uuid
         )
         registry.addVillage(village)
@@ -191,6 +229,74 @@ object VillageTradeHandler {
         }
     }
 
+    private fun handleLedgerTransfer(
+        world: ServerWorld,
+        player: ServerPlayerEntity,
+        payload: VillageLedgerTransferPayload
+    ): String {
+        val ledger = PlayerEmeraldLedger.get(world)
+        return when (payload.direction) {
+            VillageTradeNetwork.LEDGER_DIRECTION_DEPOSIT -> {
+                val available = player.inventory.count(Items.EMERALD)
+                val requested = payload.amount.coerceAtLeast(1)
+                val amount = if (requested == Int.MAX_VALUE) available else requested.coerceAtMost(available)
+                if (amount <= 0) {
+                    "You do not have emeralds to deposit."
+                } else {
+                    val removed = player.inventory.remove({ stack -> stack.isOf(Items.EMERALD) }, amount, player.inventory)
+                    if (removed <= 0) {
+                        "Could not deposit emeralds safely."
+                    } else {
+                        ledger.deposit(player.uuid, removed)
+                        "Deposited $removed emerald(s)."
+                    }
+                }
+            }
+            VillageTradeNetwork.LEDGER_DIRECTION_WITHDRAW -> {
+                val balance = ledger.balance(player.uuid)
+                val requested = payload.amount.coerceAtLeast(1)
+                val amount = if (requested == Int.MAX_VALUE) balance else requested.coerceAtMost(balance)
+                if (amount <= 0) {
+                    "Your ledger is empty."
+                } else if (!hasEmeraldInventorySpace(player, amount)) {
+                    "You need inventory space for $amount emerald(s)."
+                } else if (!ledger.withdraw(player.uuid, amount)) {
+                    "Could not withdraw emeralds safely."
+                } else {
+                    addEmeraldsToInventory(player, amount)
+                    "Withdrew $amount emerald(s)."
+                }
+            }
+            else -> "Invalid ledger action."
+        }
+    }
+
+    private fun hasEmeraldInventorySpace(player: ServerPlayerEntity, amount: Int): Boolean {
+        var remaining = amount
+        val inventory = player.inventory
+        for (slot in 0 until inventory.size()) {
+            val stack = inventory.getStack(slot)
+            if (stack.isEmpty) {
+                remaining -= EMERALD_STACK_SIZE
+            } else if (stack.isOf(Items.EMERALD)) {
+                remaining -= (stack.maxCount - stack.count).coerceAtLeast(0)
+            }
+            if (remaining <= 0) return true
+        }
+        return false
+    }
+
+    private fun addEmeraldsToInventory(player: ServerPlayerEntity, amount: Int) {
+        var remaining = amount
+        while (remaining > 0) {
+            val stackSize = remaining.coerceAtMost(EMERALD_STACK_SIZE)
+            player.inventory.insertStack(ItemStack(Items.EMERALD, stackSize))
+            remaining -= stackSize
+        }
+    }
+
+    private const val EMERALD_STACK_SIZE = 64
+
     fun openFor(player: ServerPlayerEntity, world: ServerWorld, clerkPos: BlockPos): Boolean {
         val registry = world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY)
         val village = (world.getBlockEntity(clerkPos) as? ClerkTableBlockEntity)?.villageId?.let { registry.getVillageById(it) }
@@ -202,8 +308,8 @@ object VillageTradeHandler {
             player.sendMessage(Text.literal("Another player is already using this trading post.").formatted(Formatting.RED), false)
             return true
         }
-        val snapshot = VillageEconomyService.openSnapshot(world, clerkPos)
-            ?: VillageEconomyService.emptySnapshotForRegisteredVillage(world, clerkPos)
+        val snapshot = VillageEconomyService.openSnapshot(world, clerkPos, player)
+            ?: VillageEconomyService.emptySnapshotForRegisteredVillage(world, clerkPos, player)
             ?: return false
         val openData = VillageTradeOpenData(
             clerkX = primaryClerkPos.x,
@@ -243,5 +349,8 @@ private fun VillageTradeRequestPayload.position(): BlockPos =
     BlockPos(clerkX, clerkY, clerkZ)
 
 private fun VillageTradeRefreshPayload.position(): BlockPos =
+    BlockPos(clerkX, clerkY, clerkZ)
+
+private fun VillageLedgerTransferPayload.position(): BlockPos =
     BlockPos(clerkX, clerkY, clerkZ)
 

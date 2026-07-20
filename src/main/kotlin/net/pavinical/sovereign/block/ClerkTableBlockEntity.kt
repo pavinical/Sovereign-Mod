@@ -338,13 +338,12 @@ class ClerkTableBlockEntity(pos: BlockPos, state: BlockState) : BlockEntity(ModB
         tier: VillageTier,
         owningVillageId: UUID?
     ): List<HamletSlot> {
-        val includeArtisans = tier.ordinal >= VillageTier.VILLAGE.ordinal
         return allRecords
             .asSequence()
             .filter { it.state != VillagerState.DECEASED }
             .filter { record ->
                 val professionId = professionToId(record.profession)
-                professionId != NITWIT_ID && (includeArtisans || professionId !in ARTISAN_PROFESSION_IDS)
+                professionId != NITWIT_ID
             }
             .sortedBy { it.lastSeenTick }
             .map { record ->

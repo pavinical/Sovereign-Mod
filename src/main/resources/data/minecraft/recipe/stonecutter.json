@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "#": {
+      "item": "minecraft:stone"
+    },
+    "I": {
+      "item": "minecraft:iron_ingot"
+    }
+  },
+  "pattern": [
+    " I ",
+    "###"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:stonecutter",
+    "components": {
+      "minecraft:custom_data": {
+        "sovereign_civilian_job_block": true
+      }
+    }
+  }
+}

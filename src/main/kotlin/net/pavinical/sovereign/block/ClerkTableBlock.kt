@@ -3,13 +3,19 @@ package net.pavinical.sovereign.block
 import net.minecraft.block.Block
 import net.minecraft.block.BlockEntityProvider
 import net.minecraft.block.BlockState
+import net.minecraft.block.HorizontalFacingBlock
 import net.minecraft.block.ShapeContext
 import net.minecraft.block.entity.BlockEntity
 import net.minecraft.entity.player.PlayerEntity
+import net.minecraft.item.ItemPlacementContext
 import net.minecraft.server.network.ServerPlayerEntity
+import net.minecraft.state.StateManager
+import net.minecraft.state.property.DirectionProperty
 import net.minecraft.text.Text
 import net.minecraft.util.Formatting
 import net.minecraft.util.ActionResult
+import net.minecraft.util.BlockMirror
+import net.minecraft.util.BlockRotation
 import net.minecraft.util.hit.BlockHitResult
 import net.minecraft.util.math.BlockPos
 import net.minecraft.util.shape.VoxelShape
@@ -29,11 +35,32 @@ import net.pavinical.sovereign.economy.VillageTradeHandler
  */
 class ClerkTableBlock(settings: Settings) : Block(settings), BlockEntityProvider {
     companion object {
+        val FACING: DirectionProperty = HorizontalFacingBlock.FACING
         const val VILLAGE_SCAN_RADIUS_BLOCKS = 100
         const val MIN_VILLAGE_DISTANCE_BLOCKS = VILLAGE_SCAN_RADIUS_BLOCKS * 2
 
         // Slightly shorter than a full block so it reads as a table.
         val SHAPE: VoxelShape = createCuboidShape(0.0, 0.0, 0.0, 16.0, 12.0, 16.0)
+    }
+
+    init {
+        defaultState = stateManager.defaultState.with(FACING, net.minecraft.util.math.Direction.NORTH)
+    }
+
+    override fun getPlacementState(ctx: ItemPlacementContext): BlockState {
+        return defaultState.with(FACING, ctx.horizontalPlayerFacing.opposite)
+    }
+
+    override fun appendProperties(builder: StateManager.Builder<Block, BlockState>) {
+        builder.add(FACING)
+    }
+
+    override fun rotate(state: BlockState, rotation: BlockRotation): BlockState {
+        return state.with(FACING, rotation.rotate(state.get(FACING)))
+    }
+
+    override fun mirror(state: BlockState, mirror: BlockMirror): BlockState {
+        return state.rotate(mirror.getRotation(state.get(FACING)))
     }
 
     override fun onUse(
@@ -92,7 +119,7 @@ class ClerkTableBlock(settings: Settings) : Block(settings), BlockEntityProvider
             .orElse("unknown")
 
         NamingSession.start(serverPlayer.uuid, pos, biome)
-        VillageTradeHandler.openNamingScreen(serverPlayer, pos)
+        VillageTradeHandler.openNamingScreen(serverPlayer, pos, biome)
 
         return ActionResult.SUCCESS
     }

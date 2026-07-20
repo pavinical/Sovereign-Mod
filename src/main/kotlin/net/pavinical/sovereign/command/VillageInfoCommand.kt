@@ -17,8 +17,12 @@ import net.pavinical.sovereign.block.HamletSlot
 import net.pavinical.sovereign.data.VillageData
 import net.pavinical.sovereign.data.VillageTier
 import net.pavinical.sovereign.economy.BuyOffer
+import net.pavinical.sovereign.economy.PlayerEmeraldLedger
 import net.pavinical.sovereign.economy.SellOffer
 import net.pavinical.sovereign.economy.VillageEconomyService
+import net.pavinical.sovereign.economy.VillageLevelUpCelebration
+import net.pavinical.sovereign.economy.VillagePlotService
+import net.pavinical.sovereign.economy.VillageProgression
 import net.pavinical.sovereign.economy.VillageRegistry
 
     private const val ARG_NAME = "name"
@@ -26,6 +30,9 @@ import net.pavinical.sovereign.economy.VillageRegistry
     private const val ARG_AMOUNT = "amount"
     private const val ARG_TICKS = "ticks"
     private const val ARG_LEVEL = "level"
+    private const val ARG_PLOT = "plot"
+    private const val ARG_STRUCTURE = "structure"
+private const val ABANDONED_COMMISSION_TICKS = 30L * 24000L
 private const val MAX_VILLAGE_NAME_LENGTH = 16
 
 object VillageInfoCommand {
@@ -128,6 +135,50 @@ object VillageInfoCommand {
                     )
             )
             dispatcher.register(
+                literal("villagetestprogress")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .executes { context ->
+                        executeTestProgress(context.source)
+                    }
+            )
+            dispatcher.register(
+                literal("villagetesttradexp")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .then(
+                        argument(ARG_AMOUNT, IntegerArgumentType.integer(0))
+                            .executes { context ->
+                                executeTestTradeExperience(
+                                    context.source,
+                                    IntegerArgumentType.getInteger(context, ARG_AMOUNT)
+                                )
+                            }
+                    )
+            )
+            dispatcher.register(
+                literal("villagetestbuildxp")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .then(
+                        argument(ARG_STRUCTURE, StringArgumentType.word())
+                            .then(
+                                argument(ARG_LEVEL, IntegerArgumentType.integer(1, 3))
+                                    .executes { context ->
+                                        executeTestBuildingExperience(
+                                            context.source,
+                                            StringArgumentType.getString(context, ARG_STRUCTURE),
+                                            IntegerArgumentType.getInteger(context, ARG_LEVEL)
+                                        )
+                                    }
+                            )
+                    )
+            )
+            dispatcher.register(
+                literal("villagetestresetxp")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .executes { context ->
+                        executeTestResetExperience(context.source)
+                    }
+            )
+            dispatcher.register(
                 literal("villagesetlevel")
                     .then(
                         argument(ARG_LEVEL, StringArgumentType.word())
@@ -139,7 +190,222 @@ object VillageInfoCommand {
                             }
                     )
             )
+            dispatcher.register(
+                literal("bal")
+                    .executes { context ->
+                        executeBalanceCheck(context.source)
+                    }
+            )
+            dispatcher.register(
+                literal("balset")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .then(
+                        argument(ARG_AMOUNT, IntegerArgumentType.integer(0))
+                            .executes { context ->
+                                executeBalanceSet(
+                                    context.source,
+                                    IntegerArgumentType.getInteger(context, ARG_AMOUNT)
+                                )
+                            }
+                    )
+            )
+            dispatcher.register(
+                literal("commissioncomplete")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .executes { context ->
+                        executeCompleteCommissions(context.source)
+                    }
+            )
+            dispatcher.register(
+                literal("commissionabandon")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .executes { context ->
+                        executeAbandonCommissions(context.source)
+                    }
+            )
+            dispatcher.register(
+                literal("villageplots")
+                    .executes { context ->
+                        executeListPlots(context.source)
+                    }
+            )
+            dispatcher.register(
+                literal("villageplot")
+                    .then(
+                        argument(ARG_STRUCTURE, StringArgumentType.word())
+                            .executes { context ->
+                                executePlacePlot(
+                                    context.source,
+                                    StringArgumentType.getString(context, ARG_STRUCTURE)
+                                )
+                            }
+                    )
+            )
+            dispatcher.register(
+                literal("villagebuild")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .then(
+                        argument(ARG_PLOT, IntegerArgumentType.integer(1))
+                            .then(
+                                argument(ARG_STRUCTURE, StringArgumentType.word())
+                                    .executes { context ->
+                                        executeBuildPlot(
+                                            context.source,
+                                            IntegerArgumentType.getInteger(context, ARG_PLOT),
+                                            StringArgumentType.getString(context, ARG_STRUCTURE)
+                                        )
+                                    }
+                            )
+                    )
+            )
+            dispatcher.register(
+                literal("villageupgrade")
+                    .then(
+                        argument(ARG_PLOT, IntegerArgumentType.integer(1))
+                            .executes { context ->
+                                executeUpgradeHouse(
+                                    context.source,
+                                    IntegerArgumentType.getInteger(context, ARG_PLOT)
+                                )
+                            }
+                    )
+            )
+            dispatcher.register(
+                literal("villagebuildspeedup")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .then(
+                        argument(ARG_TICKS, IntegerArgumentType.integer(1))
+                            .executes { context ->
+                                executeSpeedUpBuilds(
+                                    context.source,
+                                    IntegerArgumentType.getInteger(context, ARG_TICKS)
+                                )
+                            }
+                    )
+            )
+            dispatcher.register(
+                literal("villagebuildcomplete")
+                    .requires { source -> source.hasPermissionLevel(2) }
+                    .executes { context ->
+                        executeCompleteBuilds(context.source)
+                    }
+            )
         }
+    }
+
+    private fun executeBalanceCheck(source: ServerCommandSource): Int {
+        val player = source.player ?: run {
+            source.sendFeedback({ Text.literal("Run /bal as a player.").formatted(Formatting.RED) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        val balance = PlayerEmeraldLedger.get(player.serverWorld).balance(player.uuid)
+        source.sendFeedback({ Text.literal("Emerald balance: $balance").formatted(Formatting.GREEN) }, false)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeBalanceSet(source: ServerCommandSource, amount: Int): Int {
+        val player = source.player ?: run {
+            source.sendFeedback({ Text.literal("Run /balset <amount> as a player.").formatted(Formatting.RED) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        val balance = PlayerEmeraldLedger.get(player.serverWorld).setBalance(player.uuid, amount)
+        source.sendFeedback({ Text.literal("Emerald balance set to $balance.").formatted(Formatting.GREEN) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeCompleteCommissions(source: ServerCommandSource): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val pending = village.commissions.filter { !it.claimed && it.readyTick > world.time }
+        if (pending.isEmpty()) {
+            source.sendFeedback({ Text.literal("${village.name} has no waiting commissions.").formatted(Formatting.YELLOW) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        pending.forEach { it.readyTick = world.time }
+        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        source.sendFeedback({ Text.literal("Completed ${pending.size} commission(s) in ${village.name}.").formatted(Formatting.GREEN) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeAbandonCommissions(source: ServerCommandSource): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val unclaimed = village.commissions.filter { !it.claimed }
+        if (unclaimed.isEmpty()) {
+            source.sendFeedback({ Text.literal("${village.name} has no unclaimed commissions.").formatted(Formatting.YELLOW) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        val abandonedReadyTick = world.time - ABANDONED_COMMISSION_TICKS
+        unclaimed.forEach { it.readyTick = abandonedReadyTick }
+        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        source.sendFeedback({ Text.literal("Abandoned ${unclaimed.size} commission(s) in ${village.name}.").formatted(Formatting.GREEN) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeListPlots(source: ServerCommandSource): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val created = VillagePlotService.ensurePlots(world, village)
+        val header = if (created > 0) {
+            "${village.name} plotted $created new site(s)."
+        } else {
+            "${village.name} plots:"
+        }
+        source.sendFeedback({ Text.literal(header).formatted(Formatting.GOLD) }, false)
+        VillagePlotService.describe(village).forEach { line ->
+            source.sendFeedback({ Text.literal(line).formatted(Formatting.YELLOW) }, false)
+        }
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executePlacePlot(source: ServerCommandSource, structure: String): Int {
+        val player = source.player ?: run {
+            source.sendFeedback({ Text.literal("Run /villageplot <house|castle> as a player.").formatted(Formatting.RED) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        val world = player.serverWorld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        source.sendFeedback({ VillagePlotService.placeManualPlot(world, village, player, structure) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeBuildPlot(source: ServerCommandSource, plot: Int, structure: String): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        source.sendFeedback({ VillagePlotService.build(world, village, plot, structure) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeUpgradeHouse(source: ServerCommandSource, plot: Int): Int {
+        val player = source.player ?: run {
+            source.sendFeedback({ Text.literal("Run /villageupgrade <plot> as a player.").formatted(Formatting.RED) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        val world = player.serverWorld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        source.sendFeedback({ VillagePlotService.upgradeHouse(world, village, player, plot) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeSpeedUpBuilds(source: ServerCommandSource, ticks: Int): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val changed = VillagePlotService.speedUpBuilds(world, village, ticks.toLong())
+        source.sendFeedback({ Text.literal("Advanced $changed build site(s) in ${village.name}.").formatted(Formatting.GREEN) }, true)
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeCompleteBuilds(source: ServerCommandSource): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val pending = village.plots.count { it.isPending() }
+        if (pending == 0) {
+            source.sendFeedback({ Text.literal("${village.name} has no active builds.").formatted(Formatting.YELLOW) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        val changed = VillagePlotService.speedUpBuilds(world, village, Long.MAX_VALUE / 4)
+        source.sendFeedback({ Text.literal("Completed $changed build site(s) in ${village.name}.").formatted(Formatting.GREEN) }, true)
+        return Command.SINGLE_SUCCESS
     }
 
     private fun execute(source: ServerCommandSource, rawName: String, dump: Boolean): Int {
@@ -227,13 +493,84 @@ object VillageInfoCommand {
     private fun executeAddExperience(source: ServerCommandSource, amount: Int): Int {
         val world = source.server.overworld
         val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val oldTier = village.tier
         village.experience = (village.experience + amount).coerceAtLeast(0)
         updateVillageTier(village)
+        VillageLevelUpCelebration.play(world, village, oldTier)
+        VillagePlotService.ensurePlots(world, village)
         world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
         source.sendFeedback(
             { Text.literal("${village.name} now has ${village.experience} XP and is a ${village.tier.displayName()}.") },
             false
         )
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeTestProgress(source: ServerCommandSource): Int {
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        source.sendFeedback(
+            {
+                Text.literal(
+                    buildString {
+                        append("${village.name} progression: ")
+                        append("${village.tier.displayName()}, ")
+                        append("${village.experience}/${nextTierExperience(village.tier)} XP, ")
+                        append("trade ${village.tradeExperience}/${VillageProgression.tradeExperienceCapFor(village.tier)} XP, ")
+                        append("castle=${if (VillageProgression.hasBuiltCastle(village)) "built" else "needed for City"}")
+                    }
+                ).formatted(Formatting.AQUA)
+            },
+            false
+        )
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeTestTradeExperience(source: ServerCommandSource, amount: Int): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val oldTier = village.tier
+        val granted = VillageProgression.addTradeExperience(village, amount)
+        VillageLevelUpCelebration.play(world, village, oldTier)
+        VillagePlotService.ensurePlots(world, village)
+        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        source.sendFeedback(
+            {
+                Text.literal("Trade test granted $granted/$amount XP. ${village.name}: ${village.experience} XP, ${village.tier.displayName()}.")
+                    .formatted(if (granted < amount) Formatting.YELLOW else Formatting.GREEN)
+            },
+            true
+        )
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeTestBuildingExperience(source: ServerCommandSource, structure: String, level: Int): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        val oldTier = village.tier
+        val granted = VillageProgression.addBuildingExperience(village, structure, level)
+        if (granted <= 0) {
+            source.sendFeedback({ Text.literal("Use /villagetestbuildxp <house|castle> <1-3>.").formatted(Formatting.RED) }, false)
+            return Command.SINGLE_SUCCESS
+        }
+        VillageLevelUpCelebration.play(world, village, oldTier)
+        VillagePlotService.ensurePlots(world, village)
+        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        source.sendFeedback(
+            { Text.literal("Building test granted $granted XP. ${village.name}: ${village.experience} XP, ${village.tier.displayName()}.").formatted(Formatting.GREEN) },
+            true
+        )
+        return Command.SINGLE_SUCCESS
+    }
+
+    private fun executeTestResetExperience(source: ServerCommandSource): Int {
+        val world = source.server.overworld
+        val village = nearestVillageForCommand(source) ?: return Command.SINGLE_SUCCESS
+        village.experience = 0
+        village.tradeExperience = 0
+        village.tier = VillageTier.HAMLET
+        VillagePlotService.ensurePlots(world, village)
+        world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
+        source.sendFeedback({ Text.literal("${village.name} progression reset to Hamlet with 0 XP.").formatted(Formatting.GREEN) }, true)
         return Command.SINGLE_SUCCESS
     }
 
@@ -246,8 +583,12 @@ object VillageInfoCommand {
                 return Command.SINGLE_SUCCESS
             }
 
+        val oldTier = village.tier
         village.tier = tier
         village.experience = tierMinExperience(tier)
+        village.tradeExperience = village.experience
+        VillageLevelUpCelebration.play(world, village, oldTier)
+        VillagePlotService.ensurePlots(world, village)
         world.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY).markDirty()
         source.sendFeedback(
             { Text.literal("${village.name} set to ${tier.displayName()} with ${village.experience} XP.") },
@@ -271,23 +612,11 @@ object VillageInfoCommand {
     }
 
     private fun updateVillageTier(village: VillageData) {
-        village.tier = when {
-            village.experience >= 15000 -> VillageTier.CITY
-            village.experience >= 5000 -> VillageTier.TOWN
-            village.experience >= 1600 -> VillageTier.VILLAGE
-            village.experience >= 300 -> VillageTier.SETTLEMENT
-            else -> VillageTier.HAMLET
-        }
+        VillageProgression.updateTier(village)
     }
 
     private fun tierMinExperience(tier: VillageTier): Int {
-        return when (tier) {
-            VillageTier.HAMLET -> 0
-            VillageTier.SETTLEMENT -> 300
-            VillageTier.VILLAGE -> 1600
-            VillageTier.TOWN -> 5000
-            VillageTier.CITY -> 15000
-        }
+        return VillageProgression.tierMinExperience(tier)
     }
 
     private fun parseVillageTier(rawLevel: String): VillageTier? {
@@ -414,6 +743,7 @@ object VillageInfoCommand {
             appendLine("  tier=${village.tier}")
             appendLine("  biome=${village.biome}")
             appendLine("  clerkPos=${village.clerkPos}")
+            appendLine("  centerPos=${village.centerPos}")
             appendLine("  snapshot=missing (clerk table missing)")
             append("}")
         }
@@ -443,6 +773,7 @@ object VillageInfoCommand {
             appendLine("  founder=${village.founderId ?: "unknown"}")
             appendLine("  biome=${village.biome}")
             appendLine("  clerkPos=${village.clerkPos}")
+            appendLine("  centerPos=${village.centerPos}")
             appendLine("  population=${snapshot.population}")
             appendLine("  active=${snapshot.activeCount}")
             appendLine("  missing=${snapshot.temporarilyMissingCount}")
@@ -455,6 +786,7 @@ object VillageInfoCommand {
             appendLine("  needsFulfilled=${formatStringIntMap(village.buyDemandFulfilledByProfession)}")
             appendLine("  wantsTotal=${formatStringIntMap(village.wantDemandTotalByProfession)}")
             appendLine("  wantsFulfilled=${formatStringIntMap(village.wantDemandFulfilledByProfession)}")
+            appendLine("  plots=${VillagePlotService.describe(village).joinToString("; ")}")
             append("  slots=[")
             append(slotLines)
             appendLine("]")
@@ -502,12 +834,14 @@ object VillageInfoCommand {
             .append(Text.literal("==== ${village.name} ====\n").formatted(Formatting.GOLD, Formatting.BOLD))
             .append(infoLine("Level", village.tier.displayName(), Formatting.AQUA))
             .append(infoLine("XP", xpLine, Formatting.GREEN))
+            .append(infoLine("Center", "${village.centerPos.x}, ${village.centerPos.y}, ${village.centerPos.z}", Formatting.GRAY))
             .append(infoLine("Population", populationLine, Formatting.YELLOW))
             .append(infoLine("Worker Slots", workerSlotsLine, Formatting.YELLOW))
             .append(infoLine("Storage", storageLine, if (storageUsed >= storageCapacity) Formatting.RED else Formatting.GREEN))
             .append(infoLine("Professions", professionsLine, Formatting.WHITE))
             .append(infoLine("Village Sells", formatSellOffers(marketSnapshot?.sellOffers.orEmpty()), Formatting.GREEN))
             .append(infoLine("Village Wants", formatBuyOffers(marketSnapshot?.buyOffers.orEmpty()), Formatting.LIGHT_PURPLE))
+            .append(infoLine("Plots", VillagePlotService.describe(village).joinToString(" | "), Formatting.AQUA))
             .append(infoLine("Turn-ins Today", formatTradeMap(village.wantTradeCountByProfession), Formatting.GRAY))
             .append(Text.literal("Slot Groups\n").formatted(Formatting.GOLD))
             .append(Text.literal(slotLines).formatted(Formatting.GRAY))
@@ -598,22 +932,16 @@ object VillageInfoCommand {
     }
 
     private fun nextTierExperience(tier: VillageTier): Int {
-        return when (tier) {
-            VillageTier.HAMLET -> 300
-            VillageTier.SETTLEMENT -> 1600
-            VillageTier.VILLAGE -> 5000
-            VillageTier.TOWN -> 15000
-            VillageTier.CITY -> 15000
-        }
+        return VillageProgression.nextTierExperience(tier)
     }
 
     private fun villageStorageCapacity(tier: VillageTier): Int {
         return when (tier) {
-            VillageTier.HAMLET -> 128
-            VillageTier.SETTLEMENT -> 256
-            VillageTier.VILLAGE -> 512
-            VillageTier.TOWN -> 768
-            VillageTier.CITY -> 1024
+            VillageTier.HAMLET -> 4096
+            VillageTier.SETTLEMENT -> 8192
+            VillageTier.VILLAGE -> 16384
+            VillageTier.TOWN -> 32768
+            VillageTier.CITY -> 65536
         }
     }
 }

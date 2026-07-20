@@ -57,7 +57,6 @@ object ClerkEconomyService {
             resetVillageEconomy(village)
             village.lastEconomyDay = currentDay
             village.lastEconomyTick = currentDay * TICKS_PER_DAY
-            village.lastProductionTick = currentDay * TICKS_PER_DAY
             village.lastNeedTick = currentDay * TICKS_PER_DAY
             changed = true
         }
@@ -384,11 +383,11 @@ object ClerkEconomyService {
 
     private fun villageStorageCapacity(tier: VillageTier): Int {
         return when (tier) {
-            VillageTier.HAMLET -> 128
-            VillageTier.SETTLEMENT -> 256
-            VillageTier.VILLAGE -> 512
-            VillageTier.TOWN -> 768
-            VillageTier.CITY -> 1024
+            VillageTier.HAMLET -> 4096
+            VillageTier.SETTLEMENT -> 8192
+            VillageTier.VILLAGE -> 16384
+            VillageTier.TOWN -> 32768
+            VillageTier.CITY -> 65536
         }
     }
 
@@ -566,7 +565,6 @@ object ClerkEconomyService {
                 if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
                     add("minecraft:pumpkin", 8)
                     add("minecraft:melon", 8)
-                    add("minecraft:hay_block", 4)
                 }
                 if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
                     add("minecraft:cookie", 12)
@@ -603,21 +601,18 @@ object ClerkEconomyService {
                 add("minecraft:stone", 16)
                 add("minecraft:gravel", 16)
                 if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
-                    add("minecraft:iron_ore", 8)
-                    add("minecraft:copper_ore", 8)
+                    add("minecraft:raw_iron", 8)
+                    add("minecraft:raw_copper", 8)
                 }
                 if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
-                    add("minecraft:iron_ingot", 10)
-                    add("minecraft:copper_ingot", 10)
                     add("minecraft:tuff", 16)
                 }
                 if (tier.ordinal >= VillageTier.TOWN.ordinal) {
-                    add("minecraft:gold_ore", 6)
-                    add("minecraft:gold_ingot", 8)
+                    add("minecraft:raw_gold", 8)
                 }
                 if (tier.ordinal >= VillageTier.CITY.ordinal) {
-                    add("minecraft:iron_ingot", 32)
-                    add("minecraft:copper_ingot", 32)
+                    add("minecraft:raw_iron", 32)
+                    add("minecraft:raw_copper", 32)
                 }
             }
             "fletcher" -> {
@@ -696,10 +691,14 @@ object ClerkEconomyService {
                 }
             }
             "librarian" -> {
-                if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
+                add("minecraft:paper", 12)
+                add("minecraft:ink_sac", 4)
+                if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
                     add("minecraft:book", 10)
+                    add("minecraft:writable_book", 2)
+                }
+                if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
                     add("minecraft:bookshelf", 2)
-                    add("minecraft:paper", 12)
                 }
                 if (tier.ordinal >= VillageTier.TOWN.ordinal) add("minecraft:lantern", 4)
                 if (tier.ordinal >= VillageTier.TOWN.ordinal) {
@@ -721,6 +720,12 @@ object ClerkEconomyService {
                 }
             }
             "cleric" -> {
+                add("minecraft:candle", 4)
+                add("minecraft:glass_bottle", 8)
+                if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
+                    add("minecraft:lapis_lazuli", 8)
+                    add("minecraft:amethyst_shard", 4)
+                }
                 if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
                     add("minecraft:redstone", 8)
                     add("minecraft:glowstone_dust", 8)
@@ -744,13 +749,20 @@ object ClerkEconomyService {
                 }
             }
             "toolsmith" -> {
+                add("minecraft:stone_pickaxe", 1)
+                add("minecraft:stone_axe", 1)
+                add("minecraft:stone_shovel", 1)
+                if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
+                    add("minecraft:shears", 1)
+                    add("minecraft:flint_and_steel", 1)
+                    add("minecraft:bucket", 1)
+                }
                 if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
                     add("minecraft:iron_pickaxe", 1)
                     add("minecraft:iron_axe", 1)
                     add("minecraft:iron_shovel", 1)
                     add("minecraft:iron_hoe", 1)
                     add("minecraft:fishing_rod", 1)
-                    add("minecraft:shears", 1)
                 }
                 if (tier.ordinal >= VillageTier.TOWN.ordinal) {
                     add("minecraft:diamond_pickaxe", 1)
@@ -759,13 +771,18 @@ object ClerkEconomyService {
                 if (tier.ordinal >= VillageTier.CITY.ordinal) add("minecraft:enchanted_book#mending", 1)
             }
             "weaponsmith" -> {
+                add("minecraft:arrow", 12)
+                add("minecraft:stone_sword", 1)
+                if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
+                    add("minecraft:shield", 1)
+                    add("minecraft:bow", 1)
+                }
                 if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
                     add("minecraft:iron_sword", 1)
                     add("minecraft:iron_axe", 1)
                 }
                 if (tier.ordinal >= VillageTier.TOWN.ordinal) {
                     add("minecraft:diamond_sword", 1)
-                    add("minecraft:bow", 1)
                     add("minecraft:crossbow", 1)
                 }
                 if (tier.ordinal >= VillageTier.CITY.ordinal) {
@@ -775,6 +792,15 @@ object ClerkEconomyService {
                 }
             }
             "armorer" -> {
+                add("minecraft:leather_helmet", 1)
+                add("minecraft:leather_boots", 1)
+                add("minecraft:shield", 1)
+                if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
+                    add("minecraft:chainmail_helmet", 1)
+                    add("minecraft:chainmail_chestplate", 1)
+                    add("minecraft:chainmail_leggings", 1)
+                    add("minecraft:chainmail_boots", 1)
+                }
                 if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
                     add("minecraft:iron_helmet", 1)
                     add("minecraft:iron_chestplate", 1)
@@ -798,14 +824,17 @@ object ClerkEconomyService {
                 }
             }
             "cartographer" -> {
-                if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
-                    add("minecraft:map", 4)
-                    add("minecraft:filled_map", 1)
+                add("minecraft:map", 4)
+                add("minecraft:paper", 12)
+                if (tier.ordinal >= VillageTier.SETTLEMENT.ordinal) {
                     add("minecraft:compass", 1)
+                    add("minecraft:item_frame", 2)
+                }
+                if (tier.ordinal >= VillageTier.VILLAGE.ordinal) {
+                    add("minecraft:filled_map", 1)
                 }
                 if (tier.ordinal >= VillageTier.TOWN.ordinal) {
                     add("minecraft:flower_banner_pattern", 1)
-                    add("minecraft:item_frame", 4)
                 }
                 if (tier.ordinal >= VillageTier.CITY.ordinal) {
                     add("minecraft:filled_map#ocean_explorer", 1)
@@ -815,8 +844,110 @@ object ClerkEconomyService {
             }
         }
 
-        return outputs
+        val filtered = outputs.filter { (stockKey, _) -> shouldIncludeArchetypeOutput(village, professionId, stockKey) }
+        if (filtered.isNotEmpty() || outputs.isEmpty()) return filtered
+
+        return outputs.sortedBy { (stockKey, _) -> "${village.id}:$professionId:$stockKey".hashCode() }
+            .take(MIN_ARCHETYPE_SELL_OUTPUTS)
     }
+
+    private fun shouldIncludeArchetypeOutput(village: VillageData, professionId: String, stockKey: String): Boolean {
+        val archetypes = PROFESSION_OUTPUT_ARCHETYPES[professionId.substringAfterLast(":")] ?: return true
+        val itemKey = stockKey.substringAfter("|").substringAfter("|").substringBefore("#")
+        if (village.tier.ordinal >= VillageTier.CITY.ordinal && itemKey in CITY_OUTPUT_KEYS_BY_PROFESSION[professionId.substringAfterLast(":")].orEmpty()) {
+            return true
+        }
+        val allArchetypeKeys = archetypes.flatten().toSet()
+        if (itemKey !in allArchetypeKeys) return true
+        val index = Math.floorMod("${village.id}:$professionId:trade-archetype".hashCode(), archetypes.size)
+        return itemKey in archetypes[index]
+    }
+
+    private const val MIN_ARCHETYPE_SELL_OUTPUTS = 1
+
+    private val PROFESSION_OUTPUT_ARCHETYPES: Map<String, List<Set<String>>> = mapOf(
+        "farmer" to listOf(
+            setOf("minecraft:wheat", "minecraft:bread", "minecraft:cookie"),
+            setOf("minecraft:carrot", "minecraft:potato", "minecraft:golden_carrot"),
+            setOf("minecraft:beetroot", "minecraft:pumpkin", "minecraft:melon", "minecraft:pumpkin_pie", "minecraft:suspicious_stew")
+        ),
+        "shepherd" to listOf(
+            setOf("minecraft:white_wool", "minecraft:white_carpet", "minecraft:white_bed", "minecraft:white_banner"),
+            setOf("minecraft:gray_wool", "minecraft:black_wool", "minecraft:black_banner"),
+            setOf("minecraft:red_wool", "minecraft:blue_wool", "minecraft:string")
+        ),
+        "mason" to listOf(
+            setOf("minecraft:cobblestone", "minecraft:stone", "minecraft:tuff"),
+            setOf("minecraft:gravel", "minecraft:coal", "minecraft:raw_copper"),
+            setOf("minecraft:raw_iron", "minecraft:raw_gold")
+        ),
+        "fletcher" to listOf(
+            setOf("minecraft:oak_log", "minecraft:spruce_log", "minecraft:oak_planks"),
+            setOf("minecraft:birch_log", "minecraft:jungle_log", "minecraft:acacia_log"),
+            setOf("minecraft:mangrove_log", "minecraft:cherry_log", "minecraft:bamboo_block")
+        ),
+        "butcher" to listOf(
+            setOf("minecraft:beef", "minecraft:cooked_beef", "minecraft:porkchop", "minecraft:cooked_porkchop"),
+            setOf("minecraft:chicken", "minecraft:cooked_chicken", "minecraft:rabbit", "minecraft:rabbit_stew"),
+            setOf("minecraft:beef", "minecraft:chicken", "minecraft:cooked_chicken")
+        ),
+        "leatherworker" to listOf(
+            setOf("minecraft:leather", "minecraft:saddle", "minecraft:bundle"),
+            setOf("minecraft:leather_helmet", "minecraft:leather_chestplate", "minecraft:leather_leggings", "minecraft:leather_boots"),
+            setOf("minecraft:item_frame", "minecraft:bundle", "minecraft:leather")
+        ),
+        "fisherman" to listOf(
+            setOf("minecraft:cod", "minecraft:cooked_cod", "minecraft:barrel"),
+            setOf("minecraft:salmon", "minecraft:cooked_salmon", "minecraft:oak_boat"),
+            setOf("minecraft:tropical_fish", "minecraft:pufferfish", "minecraft:barrel")
+        ),
+        "toolsmith" to listOf(
+            setOf("minecraft:stone_pickaxe", "minecraft:stone_shovel", "minecraft:iron_pickaxe", "minecraft:iron_shovel", "minecraft:diamond_pickaxe"),
+            setOf("minecraft:stone_axe", "minecraft:iron_axe", "minecraft:iron_hoe", "minecraft:diamond_axe", "minecraft:flint_and_steel"),
+            setOf("minecraft:shears", "minecraft:bucket", "minecraft:fishing_rod", "minecraft:iron_hoe")
+        ),
+        "weaponsmith" to listOf(
+            setOf("minecraft:stone_sword", "minecraft:iron_sword", "minecraft:diamond_sword"),
+            setOf("minecraft:arrow", "minecraft:bow", "minecraft:crossbow"),
+            setOf("minecraft:shield", "minecraft:iron_axe", "minecraft:crossbow")
+        ),
+        "armorer" to listOf(
+            setOf("minecraft:leather_helmet", "minecraft:chainmail_helmet", "minecraft:chainmail_chestplate", "minecraft:iron_helmet", "minecraft:iron_chestplate", "minecraft:diamond_helmet", "minecraft:diamond_chestplate"),
+            setOf("minecraft:leather_boots", "minecraft:chainmail_leggings", "minecraft:chainmail_boots", "minecraft:iron_leggings", "minecraft:iron_boots", "minecraft:diamond_leggings", "minecraft:diamond_boots"),
+            setOf("minecraft:shield", "minecraft:chainmail_chestplate", "minecraft:chainmail_leggings", "minecraft:iron_chestplate", "minecraft:iron_leggings", "minecraft:diamond_chestplate", "minecraft:diamond_leggings")
+        ),
+        "cleric" to listOf(
+            setOf("minecraft:candle", "minecraft:glass_bottle", "minecraft:brewing_stand"),
+            setOf("minecraft:lapis_lazuli", "minecraft:glowstone_dust", "minecraft:glass_bottle"),
+            setOf("minecraft:amethyst_shard", "minecraft:redstone", "minecraft:experience_bottle", "minecraft:ender_pearl")
+        ),
+        "librarian" to listOf(
+            setOf("minecraft:paper", "minecraft:book", "minecraft:bookshelf"),
+            setOf("minecraft:ink_sac", "minecraft:writable_book", "minecraft:lantern"),
+            setOf("minecraft:paper", "minecraft:writable_book", "minecraft:book")
+        ),
+        "cartographer" to listOf(
+            setOf("minecraft:paper", "minecraft:map", "minecraft:filled_map"),
+            setOf("minecraft:compass", "minecraft:item_frame"),
+            setOf("minecraft:map", "minecraft:flower_banner_pattern", "minecraft:filled_map")
+        )
+    )
+
+    private val CITY_OUTPUT_KEYS_BY_PROFESSION: Map<String, Set<String>> = mapOf(
+        "farmer" to setOf("minecraft:suspicious_stew", "minecraft:golden_carrot"),
+        "shepherd" to setOf("minecraft:white_banner", "minecraft:black_banner"),
+        "mason" to setOf("minecraft:raw_iron", "minecraft:raw_copper"),
+        "fletcher" to setOf("minecraft:oak_log", "minecraft:spruce_log", "minecraft:birch_log"),
+        "butcher" to setOf("minecraft:cooked_beef", "minecraft:cooked_porkchop", "minecraft:cooked_chicken"),
+        "leatherworker" to setOf("minecraft:leather", "minecraft:bundle"),
+        "fisherman" to setOf("minecraft:cod", "minecraft:salmon"),
+        "toolsmith" to setOf("minecraft:enchanted_book"),
+        "weaponsmith" to setOf("minecraft:enchanted_book"),
+        "armorer" to setOf("minecraft:enchanted_book"),
+        "cleric" to setOf("minecraft:experience_bottle", "minecraft:ender_pearl", "minecraft:redstone"),
+        "librarian" to setOf("minecraft:enchanted_book"),
+        "cartographer" to setOf("minecraft:filled_map")
+    )
 
     private fun outputKey(professionId: String, itemId: String): String = "$OUTPUT_KEY_PREFIX$professionId|$itemId"
 

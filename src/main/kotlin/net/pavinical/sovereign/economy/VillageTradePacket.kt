@@ -17,6 +17,10 @@ object VillageTradePacket {
         "sovereign_village_trade_refresh"
     )
 
+    val LEDGER_TRANSFER_ID: CustomPayload.Id<VillageLedgerTransferPayload> = CustomPayload.id(
+        "sovereign_village_ledger_transfer"
+    )
+
     val VILLAGE_NAME_OPEN_ID: CustomPayload.Id<VillageNameOpenPayload> = CustomPayload.id(
         "sovereign_village_name_open"
     )
@@ -28,6 +32,45 @@ object VillageTradePacket {
     val VILLAGE_FOUNDED_ID: CustomPayload.Id<VillageFoundedPayload> = CustomPayload.id(
         "sovereign_village_founded"
     )
+
+    val PLOT_PLACEMENT_CONFIRM_ID: CustomPayload.Id<PlotPlacementConfirmPayload> = CustomPayload.id(
+        "sovereign_plot_placement_confirm"
+    )
+
+    val PLOT_PLACEMENT_RESPONSE_ID: CustomPayload.Id<PlotPlacementResponsePayload> = CustomPayload.id(
+        "sovereign_plot_placement_response"
+    )
+}
+
+data class VillageLedgerTransferPayload(
+    val clerkX: Int,
+    val clerkY: Int,
+    val clerkZ: Int,
+    val direction: Int,
+    val amount: Int
+) : CustomPayload {
+    override fun getId(): CustomPayload.Id<VillageLedgerTransferPayload> = VillageTradePacket.LEDGER_TRANSFER_ID
+
+    companion object {
+        val PACKET_CODEC: PacketCodec<RegistryByteBuf, VillageLedgerTransferPayload> = PacketCodec.of(
+            { value, buffer ->
+                buffer.writeInt(value.clerkX)
+                buffer.writeInt(value.clerkY)
+                buffer.writeInt(value.clerkZ)
+                buffer.writeInt(value.direction)
+                buffer.writeInt(value.amount)
+            },
+            { buffer ->
+                VillageLedgerTransferPayload(
+                    clerkX = buffer.readInt(),
+                    clerkY = buffer.readInt(),
+                    clerkZ = buffer.readInt(),
+                    direction = buffer.readInt(),
+                    amount = buffer.readInt()
+                )
+            }
+        )
+    }
 }
 
 data class VillageTradeRefreshPayload(
@@ -123,7 +166,8 @@ data class VillageTradeSyncPayload(
 data class VillageNameOpenPayload(
     val clerkX: Int,
     val clerkY: Int,
-    val clerkZ: Int
+    val clerkZ: Int,
+    val biome: String
 ) : CustomPayload {
     override fun getId(): CustomPayload.Id<VillageNameOpenPayload> = VillageTradePacket.VILLAGE_NAME_OPEN_ID
 
@@ -133,12 +177,14 @@ data class VillageNameOpenPayload(
                 buffer.writeInt(value.clerkX)
                 buffer.writeInt(value.clerkY)
                 buffer.writeInt(value.clerkZ)
+                buffer.writeString(value.biome)
             },
             { buffer ->
                 VillageNameOpenPayload(
                     clerkX = buffer.readInt(),
                     clerkY = buffer.readInt(),
-                    clerkZ = buffer.readInt()
+                    clerkZ = buffer.readInt(),
+                    biome = buffer.readString()
                 )
             }
         )
@@ -186,6 +232,50 @@ data class VillageFoundedPayload(
             { buffer ->
                 VillageFoundedPayload(
                     message = buffer.readString()
+                )
+            }
+        )
+    }
+}
+
+data class PlotPlacementConfirmPayload(
+    val placementId: String,
+    val description: String
+) : CustomPayload {
+    override fun getId(): CustomPayload.Id<PlotPlacementConfirmPayload> = VillageTradePacket.PLOT_PLACEMENT_CONFIRM_ID
+
+    companion object {
+        val PACKET_CODEC: PacketCodec<RegistryByteBuf, PlotPlacementConfirmPayload> = PacketCodec.of(
+            { value, buffer ->
+                buffer.writeString(value.placementId)
+                buffer.writeString(value.description)
+            },
+            { buffer ->
+                PlotPlacementConfirmPayload(
+                    placementId = buffer.readString(),
+                    description = buffer.readString()
+                )
+            }
+        )
+    }
+}
+
+data class PlotPlacementResponsePayload(
+    val placementId: String,
+    val accepted: Boolean
+) : CustomPayload {
+    override fun getId(): CustomPayload.Id<PlotPlacementResponsePayload> = VillageTradePacket.PLOT_PLACEMENT_RESPONSE_ID
+
+    companion object {
+        val PACKET_CODEC: PacketCodec<RegistryByteBuf, PlotPlacementResponsePayload> = PacketCodec.of(
+            { value, buffer ->
+                buffer.writeString(value.placementId)
+                buffer.writeBoolean(value.accepted)
+            },
+            { buffer ->
+                PlotPlacementResponsePayload(
+                    placementId = buffer.readString(),
+                    accepted = buffer.readBoolean()
                 )
             }
         )

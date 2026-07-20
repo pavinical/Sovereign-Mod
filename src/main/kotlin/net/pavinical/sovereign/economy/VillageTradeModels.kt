@@ -10,7 +10,12 @@ import net.minecraft.util.Identifier
 data class VillageMarketSnapshot(
     val sellOffers: List<SellOffer>,
     val buyOffers: List<BuyOffer>,
+    val jobBlockOffers: List<JobBlockOffer>,
+    val commissionOffers: List<CommissionOffer>,
+    val commissionOrders: List<CommissionOrder>,
+    val buildingPlots: List<BuildingPlot>,
     val playerEmeralds: Int,
+    val villageWealth: Int,
     val refreshTicks: Long,
     val produceRefreshTicks: Long,
     val needRefreshTicks: Long,
@@ -25,13 +30,18 @@ data class VillageMarketSnapshot(
         produceRefreshTicks = produceRefreshTicks,
         needRefreshTicks = needRefreshTicks,
         playerEmeralds = playerEmeralds,
+        villageWealth = villageWealth,
         tierName = tierName,
         villageExperience = villageExperience,
         currentTierMinExperience = currentTierMinExperience,
         nextTierExperience = nextTierExperience,
         info = info,
         sellOffers = sellOffers.map { it.toNetworkOffer() },
-        buyOffers = buyOffers.map { it.toNetworkOffer() }
+        buyOffers = buyOffers.map { it.toNetworkOffer() },
+        jobBlockOffers = jobBlockOffers.map { it.toNetworkOffer() },
+        commissionOffers = commissionOffers.map { it.toNetworkOffer() },
+        commissionOrders = commissionOrders.map { it.toNetworkOrder() },
+        buildingPlots = buildingPlots.map { it.toNetworkPlot() }
     )
 }
 
@@ -218,26 +228,36 @@ data class VillageMarketSnapshotData(
     val produceRefreshTicks: Long,
     val needRefreshTicks: Long,
     val playerEmeralds: Int,
+    val villageWealth: Int,
     val tierName: String,
     val villageExperience: Int,
     val currentTierMinExperience: Int,
     val nextTierExperience: Int,
     val info: VillageInfoData,
     val sellOffers: List<VillageTradeOfferData>,
-    val buyOffers: List<VillageTradeOfferData>
+    val buyOffers: List<VillageTradeOfferData>,
+    val jobBlockOffers: List<VillageJobBlockOfferData>,
+    val commissionOffers: List<VillageCommissionOfferData>,
+    val commissionOrders: List<VillageCommissionOrderData>,
+    val buildingPlots: List<VillageBuildingPlotData>
 ) {
     fun toRuntime(): VillageMarketSnapshot = VillageMarketSnapshot(
         refreshTicks = refreshTicks,
         produceRefreshTicks = produceRefreshTicks,
         needRefreshTicks = needRefreshTicks,
         playerEmeralds = playerEmeralds,
+        villageWealth = villageWealth,
         tierName = tierName,
         villageExperience = villageExperience,
         currentTierMinExperience = currentTierMinExperience,
         nextTierExperience = nextTierExperience,
         info = info,
         sellOffers = sellOffers.map { it.toSellOffer() },
-        buyOffers = buyOffers.map { it.toBuyOffer() }
+        buyOffers = buyOffers.map { it.toBuyOffer() },
+        jobBlockOffers = jobBlockOffers.map { it.toJobBlockOffer() },
+        commissionOffers = commissionOffers.map { it.toCommissionOffer() },
+        commissionOrders = commissionOrders.map { it.toCommissionOrder() },
+        buildingPlots = buildingPlots.map { it.toBuildingPlot() }
     )
 
     companion object {
@@ -247,6 +267,7 @@ data class VillageMarketSnapshotData(
                 buf.writeLong(value.produceRefreshTicks)
                 buf.writeLong(value.needRefreshTicks)
                 buf.writeInt(value.playerEmeralds)
+                buf.writeInt(value.villageWealth)
                 buf.writeString(value.tierName)
                 buf.writeInt(value.villageExperience)
                 buf.writeInt(value.currentTierMinExperience)
@@ -254,6 +275,10 @@ data class VillageMarketSnapshotData(
                 VillageInfoData.write(buf, value.info)
                 writeOfferList(buf, value.sellOffers)
                 writeOfferList(buf, value.buyOffers)
+                writeJobBlockOfferList(buf, value.jobBlockOffers)
+                writeCommissionOfferList(buf, value.commissionOffers)
+                writeCommissionOrderList(buf, value.commissionOrders)
+                writeBuildingPlotList(buf, value.buildingPlots)
             },
             { buf ->
                 VillageMarketSnapshotData(
@@ -261,13 +286,18 @@ data class VillageMarketSnapshotData(
                     produceRefreshTicks = buf.readLong(),
                     needRefreshTicks = buf.readLong(),
                     playerEmeralds = buf.readInt(),
+                    villageWealth = buf.readInt(),
                     tierName = buf.readString(),
                     villageExperience = buf.readInt(),
                     currentTierMinExperience = buf.readInt(),
                     nextTierExperience = buf.readInt(),
                     info = VillageInfoData.read(buf),
                     sellOffers = readOfferList(buf),
-                    buyOffers = readOfferList(buf)
+                    buyOffers = readOfferList(buf),
+                    jobBlockOffers = readJobBlockOfferList(buf),
+                    commissionOffers = readCommissionOfferList(buf),
+                    commissionOrders = readCommissionOrderList(buf),
+                    buildingPlots = readBuildingPlotList(buf)
                 )
             }
         )
@@ -327,6 +357,233 @@ data class VillageMarketSnapshotData(
             }
             return offers
         }
+
+        private fun writeJobBlockOfferList(buf: RegistryByteBuf, offers: List<VillageJobBlockOfferData>) {
+            buf.writeInt(offers.size)
+            for (offer in offers) {
+                buf.writeString(offer.itemId)
+                buf.writeString(offer.displayName)
+                buf.writeString(offer.professionId)
+                buf.writeString(offer.professionName)
+                buf.writeInt(offer.emeraldCost)
+            }
+        }
+
+        private fun readJobBlockOfferList(buf: RegistryByteBuf): List<VillageJobBlockOfferData> {
+            val size = buf.readInt()
+            return List(size) {
+                VillageJobBlockOfferData(
+                    itemId = buf.readString(),
+                    displayName = buf.readString(),
+                    professionId = buf.readString(),
+                    professionName = buf.readString(),
+                    emeraldCost = buf.readInt()
+                )
+            }
+        }
+
+        private fun writeCommissionOfferList(buf: RegistryByteBuf, offers: List<VillageCommissionOfferData>) {
+            buf.writeInt(offers.size)
+            for (offer in offers) {
+                buf.writeString(offer.id)
+                buf.writeString(offer.itemId)
+                buf.writeString(offer.displayName)
+                buf.writeString(offer.professionId)
+                buf.writeString(offer.professionName)
+                buf.writeString(offer.quality)
+                buf.writeString(offer.description)
+                buf.writeInt(offer.emeraldCost)
+                buf.writeLong(offer.durationTicks)
+                buf.writeBoolean(offer.requiresInput)
+            }
+        }
+
+        private fun readCommissionOfferList(buf: RegistryByteBuf): List<VillageCommissionOfferData> {
+            val size = buf.readInt()
+            return List(size) {
+                VillageCommissionOfferData(
+                    id = buf.readString(),
+                    itemId = buf.readString(),
+                    displayName = buf.readString(),
+                    professionId = buf.readString(),
+                    professionName = buf.readString(),
+                    quality = buf.readString(),
+                    description = buf.readString(),
+                    emeraldCost = buf.readInt(),
+                    durationTicks = buf.readLong(),
+                    requiresInput = buf.readBoolean()
+                )
+            }
+        }
+
+        private fun writeCommissionOrderList(buf: RegistryByteBuf, orders: List<VillageCommissionOrderData>) {
+            buf.writeInt(orders.size)
+            for (order in orders) {
+                buf.writeString(order.id)
+                buf.writeString(order.itemId)
+                buf.writeString(order.displayName)
+                buf.writeString(order.professionId)
+                buf.writeString(order.professionName)
+                buf.writeInt(order.emeraldCost)
+                buf.writeLong(order.readyTick)
+                buf.writeLong(order.remainingTicks)
+                buf.writeBoolean(order.ready)
+                buf.writeBoolean(order.claimable)
+                buf.writeBoolean(order.abandoned)
+                buf.writeLong(order.abandonedInTicks)
+            }
+        }
+
+        private fun readCommissionOrderList(buf: RegistryByteBuf): List<VillageCommissionOrderData> {
+            val size = buf.readInt()
+            return List(size) {
+                VillageCommissionOrderData(
+                    id = buf.readString(),
+                    itemId = buf.readString(),
+                    displayName = buf.readString(),
+                    professionId = buf.readString(),
+                    professionName = buf.readString(),
+                    emeraldCost = buf.readInt(),
+                    readyTick = buf.readLong(),
+                    remainingTicks = buf.readLong(),
+                    ready = buf.readBoolean(),
+                    claimable = buf.readBoolean(),
+                    abandoned = buf.readBoolean(),
+                    abandonedInTicks = buf.readLong()
+                )
+            }
+        }
+
+        private fun writeBuildingPlotList(buf: RegistryByteBuf, plots: List<VillageBuildingPlotData>) {
+            buf.writeInt(plots.size)
+            for (plot in plots) {
+                buf.writeInt(plot.plotIndex)
+                buf.writeString(plot.itemId)
+                buf.writeString(plot.displayName)
+                buf.writeString(plot.allowedType)
+                buf.writeString(plot.builtType)
+                buf.writeString(plot.pendingType)
+                buf.writeInt(plot.buildingLevel)
+                buf.writeInt(plot.pendingLevel)
+                buf.writeInt(plot.sizeX)
+                buf.writeInt(plot.sizeZ)
+                buf.writeString(plot.facing)
+                buf.writeLong(plot.remainingTicks)
+                buf.writeInt(plot.buildCost)
+                buf.writeInt(plot.upgradeCost)
+                buf.writeBoolean(plot.canBuild)
+                buf.writeBoolean(plot.canUpgrade)
+            }
+        }
+
+        private fun readBuildingPlotList(buf: RegistryByteBuf): List<VillageBuildingPlotData> {
+            val size = buf.readInt()
+            return List(size) {
+                VillageBuildingPlotData(
+                    plotIndex = buf.readInt(),
+                    itemId = buf.readString(),
+                    displayName = buf.readString(),
+                    allowedType = buf.readString(),
+                    builtType = buf.readString(),
+                    pendingType = buf.readString(),
+                    buildingLevel = buf.readInt(),
+                    pendingLevel = buf.readInt(),
+                    sizeX = buf.readInt(),
+                    sizeZ = buf.readInt(),
+                    facing = buf.readString(),
+                    remainingTicks = buf.readLong(),
+                    buildCost = buf.readInt(),
+                    upgradeCost = buf.readInt(),
+                    canBuild = buf.readBoolean(),
+                    canUpgrade = buf.readBoolean()
+                )
+            }
+        }
+    }
+}
+
+data class VillageBuildingPlotData(
+    val plotIndex: Int,
+    val itemId: String,
+    val displayName: String,
+    val allowedType: String,
+    val builtType: String,
+    val pendingType: String,
+    val buildingLevel: Int,
+    val pendingLevel: Int,
+    val sizeX: Int,
+    val sizeZ: Int,
+    val facing: String,
+    val remainingTicks: Long,
+    val buildCost: Int,
+    val upgradeCost: Int,
+    val canBuild: Boolean,
+    val canUpgrade: Boolean
+) {
+    fun toBuildingPlot(): BuildingPlot = BuildingPlot(
+        plotIndex = plotIndex,
+        item = itemFromId(itemId),
+        displayName = displayName,
+        allowedType = allowedType,
+        builtType = builtType,
+        pendingType = pendingType,
+        buildingLevel = buildingLevel,
+        pendingLevel = pendingLevel,
+        sizeX = sizeX,
+        sizeZ = sizeZ,
+        facing = facing,
+        remainingTicks = remainingTicks,
+        buildCost = buildCost,
+        upgradeCost = upgradeCost,
+        canBuild = canBuild,
+        canUpgrade = canUpgrade
+    )
+
+    companion object {
+        fun fromBuildingPlot(plot: BuildingPlot): VillageBuildingPlotData = VillageBuildingPlotData(
+            plotIndex = plot.plotIndex,
+            itemId = itemIdOf(plot.item),
+            displayName = plot.displayName,
+            allowedType = plot.allowedType,
+            builtType = plot.builtType,
+            pendingType = plot.pendingType,
+            buildingLevel = plot.buildingLevel,
+            pendingLevel = plot.pendingLevel,
+            sizeX = plot.sizeX,
+            sizeZ = plot.sizeZ,
+            facing = plot.facing,
+            remainingTicks = plot.remainingTicks,
+            buildCost = plot.buildCost,
+            upgradeCost = plot.upgradeCost,
+            canBuild = plot.canBuild,
+            canUpgrade = plot.canUpgrade
+        )
+    }
+}
+
+data class VillageJobBlockOfferData(
+    val itemId: String,
+    val displayName: String,
+    val professionId: String,
+    val professionName: String,
+    val emeraldCost: Int
+) {
+    fun toJobBlockOffer(): JobBlockOffer = JobBlockOffer(
+        item = itemFromId(itemId),
+        displayName = displayName,
+        professionId = professionId,
+        professionName = professionName,
+        emeraldCost = emeraldCost
+    )
+
+    companion object {
+        fun fromJobBlockOffer(offer: JobBlockOffer): VillageJobBlockOfferData = VillageJobBlockOfferData(
+            itemId = itemIdOf(offer.item),
+            displayName = offer.displayName,
+            professionId = offer.professionId,
+            professionName = offer.professionName,
+            emeraldCost = offer.emeraldCost
+        )
     }
 }
 
@@ -376,9 +633,169 @@ data class BuyOffer(
     fun toNetworkOffer(): VillageTradeOfferData = VillageTradeOfferData.fromBuyOffer(this)
 }
 
+data class JobBlockOffer(
+    val item: ItemStack,
+    val displayName: String,
+    val professionId: String,
+    val professionName: String,
+    val emeraldCost: Int
+) {
+    fun toNetworkOffer(): VillageJobBlockOfferData = VillageJobBlockOfferData.fromJobBlockOffer(this)
+}
+
+data class VillageCommissionOfferData(
+    val id: String,
+    val itemId: String,
+    val displayName: String,
+    val professionId: String,
+    val professionName: String,
+    val quality: String,
+    val description: String,
+    val emeraldCost: Int,
+    val durationTicks: Long,
+    val requiresInput: Boolean
+) {
+    fun toCommissionOffer(): CommissionOffer = CommissionOffer(
+        id = id,
+        item = itemFromId(itemId),
+        displayName = displayName,
+        professionId = professionId,
+        professionName = professionName,
+        quality = quality,
+        description = description,
+        emeraldCost = emeraldCost,
+        durationTicks = durationTicks,
+        requiresInput = requiresInput
+    )
+
+    companion object {
+        fun fromCommissionOffer(offer: CommissionOffer): VillageCommissionOfferData = VillageCommissionOfferData(
+            id = offer.id,
+            itemId = itemIdOf(offer.item),
+            displayName = offer.displayName,
+            professionId = offer.professionId,
+            professionName = offer.professionName,
+            quality = offer.quality,
+            description = offer.description,
+            emeraldCost = offer.emeraldCost,
+            durationTicks = offer.durationTicks,
+            requiresInput = offer.requiresInput
+        )
+    }
+}
+
+data class VillageCommissionOrderData(
+    val id: String,
+    val itemId: String,
+    val displayName: String,
+    val professionId: String,
+    val professionName: String,
+    val emeraldCost: Int,
+    val readyTick: Long,
+    val remainingTicks: Long,
+    val ready: Boolean,
+    val claimable: Boolean,
+    val abandoned: Boolean,
+    val abandonedInTicks: Long
+) {
+    fun toCommissionOrder(): CommissionOrder = CommissionOrder(
+        id = id,
+        item = itemFromId(itemId),
+        displayName = displayName,
+        professionId = professionId,
+        professionName = professionName,
+        emeraldCost = emeraldCost,
+        readyTick = readyTick,
+        remainingTicks = remainingTicks,
+        ready = ready,
+        claimable = claimable,
+        abandoned = abandoned,
+        abandonedInTicks = abandonedInTicks
+    )
+
+    companion object {
+        fun fromCommissionOrder(order: CommissionOrder): VillageCommissionOrderData = VillageCommissionOrderData(
+            id = order.id,
+            itemId = itemIdOf(order.item),
+            displayName = order.displayName,
+            professionId = order.professionId,
+            professionName = order.professionName,
+            emeraldCost = order.emeraldCost,
+            readyTick = order.readyTick,
+            remainingTicks = order.remainingTicks,
+            ready = order.ready,
+            claimable = order.claimable,
+            abandoned = order.abandoned,
+            abandonedInTicks = order.abandonedInTicks
+        )
+    }
+}
+
+data class CommissionOffer(
+    val id: String,
+    val item: ItemStack,
+    val displayName: String,
+    val professionId: String,
+    val professionName: String,
+    val quality: String,
+    val description: String,
+    val emeraldCost: Int,
+    val durationTicks: Long,
+    val requiresInput: Boolean
+) {
+    fun toNetworkOffer(): VillageCommissionOfferData = VillageCommissionOfferData.fromCommissionOffer(this)
+}
+
+data class CommissionOrder(
+    val id: String,
+    val item: ItemStack,
+    val displayName: String,
+    val professionId: String,
+    val professionName: String,
+    val emeraldCost: Int,
+    val readyTick: Long,
+    val remainingTicks: Long,
+    val ready: Boolean,
+    val claimable: Boolean,
+    val abandoned: Boolean,
+    val abandonedInTicks: Long
+) {
+    fun toNetworkOrder(): VillageCommissionOrderData = VillageCommissionOrderData.fromCommissionOrder(this)
+}
+
+data class BuildingPlot(
+    val plotIndex: Int,
+    val item: ItemStack,
+    val displayName: String,
+    val allowedType: String,
+    val builtType: String,
+    val pendingType: String,
+    val buildingLevel: Int,
+    val pendingLevel: Int,
+    val sizeX: Int,
+    val sizeZ: Int,
+    val facing: String,
+    val remainingTicks: Long,
+    val buildCost: Int,
+    val upgradeCost: Int,
+    val canBuild: Boolean,
+    val canUpgrade: Boolean
+) {
+    fun toNetworkPlot(): VillageBuildingPlotData = VillageBuildingPlotData.fromBuildingPlot(this)
+}
+
 object VillageTradeNetwork {
     const val TRADE_DIRECTION_BUY = 0
     const val TRADE_DIRECTION_SELL = 1
+    const val TRADE_DIRECTION_JOB_BLOCK = 2
+    const val TRADE_DIRECTION_RELOCATION_TOOL = 3
+    const val TRADE_DIRECTION_COMMISSION_ORDER = 4
+    const val TRADE_DIRECTION_COMMISSION_CLAIM = 5
+    const val TRADE_DIRECTION_BUILD_STRUCTURE = 6
+    const val TRADE_DIRECTION_UPGRADE_HOUSE = 7
+    const val TRADE_DIRECTION_RELOCATE_PLOT = 8
+    const val LEDGER_DIRECTION_DEPOSIT = 0
+    const val LEDGER_DIRECTION_WITHDRAW = 1
 }
 
 data class VillageTradeOpenData(

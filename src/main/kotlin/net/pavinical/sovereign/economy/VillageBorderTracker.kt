@@ -28,6 +28,11 @@ object VillageBorderTracker {
     private fun updatePlayers(server: MinecraftServer) {
         val overworld = server.overworld
         val registry = overworld.persistentStateManager.getOrCreate(VillageRegistry.TYPE, VillageRegistry.KEY)
+        var centerChanged = false
+        registry.villages.values.forEach { village ->
+            centerChanged = VillageCenterService.ensureCenter(overworld, village) || centerChanged
+        }
+        if (centerChanged) registry.markDirty()
         val onlinePlayers = server.playerManager.playerList.map { it.uuid }.toSet()
 
         playerVillage.keys.removeIf { it !in onlinePlayers }
@@ -35,10 +40,20 @@ object VillageBorderTracker {
 
         for (player in server.playerManager.playerList) {
             val previousVillageId = playerVillage[player.uuid]
-            val currentVillage = if (player.entityWorld == overworld) {
+            val inOverworld = player.entityWorld == overworld
+            val currentVillage = if (inOverworld) {
                 registry.getVillageWithinRadius(player.blockPos, ClerkTableBlock.VILLAGE_SCAN_RADIUS_BLOCKS)
             } else {
                 null
+            }
+            val removedMarkers = PlotPlacementTool.removeMarkersOutsideVillage(
+                player,
+                registry,
+                inOverworld,
+                ClerkTableBlock.VILLAGE_SCAN_RADIUS_BLOCKS
+            )
+            if (removedMarkers > 0) {
+                player.sendMessage(net.minecraft.text.Text.literal("Your plot marker fades beyond village bounds."), false)
             }
             val remainingGraceTicks = enterGraceTicks[player.uuid] ?: 0
             if (remainingGraceTicks > 0) {
